@@ -14,6 +14,7 @@
 PushWidget::PushWidget(const std::string& targetid, QWidget* parent)
     : QWidget(parent)
 {
+    UNUSED_PARAMETER(targetid);
     // Base constructor - can be empty
 }
 
@@ -628,7 +629,7 @@ public:
         return QString::fromStdString(config_->name);
     }
 
-    QString PushWidgetImpl::GetStatusText() const {
+    QString GetStatusText() const {
         return msg_->text();
     }
     

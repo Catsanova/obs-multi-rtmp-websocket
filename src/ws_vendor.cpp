@@ -116,6 +116,7 @@ void MultiRTMPWebsocketVendor::RegisterVendorRequests(obs_websocket_vendor vendo
 }
 
 void MultiRTMPWebsocketVendor::HandleListTargetsRequest(obs_data_t* request_data, obs_data_t* response_data, void* private_data) {
+    UNUSED_PARAMETER(request_data);
     auto vendor = static_cast<MultiRTMPWebsocketVendor*>(private_data);
     bool success = vendor->HandleListTargets(response_data);
     obs_data_set_bool(response_data, "success", success);
@@ -146,12 +147,14 @@ void MultiRTMPWebsocketVendor::HandleToggleTargetRequest(obs_data_t* request_dat
 }
 
 void MultiRTMPWebsocketVendor::HandleStartAllRequest(obs_data_t* request_data, obs_data_t* response_data, void* private_data) {
+    UNUSED_PARAMETER(request_data);
     auto vendor = static_cast<MultiRTMPWebsocketVendor*>(private_data);
     bool success = vendor->HandleStartAll(response_data);
     obs_data_set_bool(response_data, "success", success);
 }
 
 void MultiRTMPWebsocketVendor::HandleStopAllRequest(obs_data_t* request_data, obs_data_t* response_data, void* private_data) {
+    UNUSED_PARAMETER(request_data);
     auto vendor = static_cast<MultiRTMPWebsocketVendor*>(private_data);
     bool success = vendor->HandleStopAll(response_data);
     obs_data_set_bool(response_data, "success", success);

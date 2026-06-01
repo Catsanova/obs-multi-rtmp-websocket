@@ -98,6 +98,37 @@ The built ZIP and installer will appear as workflow artifacts.
 
 ------------------------------------------------------------------------
 
+## Linux build
+
+Ubuntu 24.04 provides OBS packages new enough to build this plugin.
+
+```bash
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  cmake ninja-build pkg-config jq git ccache zsh build-essential \
+  qt6-base-dev libobs-dev obs-studio
+
+cmake --preset ubuntu-x86_64
+cmake --build --preset ubuntu-x86_64 -j2
+```
+
+Expected output:
+
+```text
+build_x86_64/obs-multi-rtmp.so
+```
+
+You can also run the package-based build in Docker:
+
+```bash
+docker build -f Dockerfile.linux-build -t obs-multi-rtmp-linux-build .
+```
+
+Runtime loading was smoke-tested on OBS 32.1.2 from the official OBS Project
+PPA, including websocket vendor registration for `romestylez.multi_rtmp`.
+
+------------------------------------------------------------------------
+
 ## 📚 Based on
 
 - [obs-multi-rtmp](https://github.com/sorayuki/obs-multi-rtmp) by SoraYuki
