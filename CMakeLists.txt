@@ -6,6 +6,7 @@ project(${_name} VERSION ${_version})
 
 option(ENABLE_FRONTEND_API "Use obs-frontend-api for UI functionality" OFF)
 option(ENABLE_QT "Use Qt functionality" OFF)
+option(ENABLE_WEBSOCKET "Enable OBS WebSocket vendor support" ON)
 
 include(compilerconfig)
 include(defaults)
@@ -38,6 +39,18 @@ if(ENABLE_QT)
   )
 endif()
 
+if(ENABLE_WEBSOCKET)
+  set(OBS_WEBSOCKET_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/dep/obs-websocket")
+  if(EXISTS "${OBS_WEBSOCKET_INCLUDE_DIR}/obs-websocket-api.h")
+    target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${OBS_WEBSOCKET_INCLUDE_DIR})
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE ENABLE_WEBSOCKET=1)
+    message(STATUS "Found obs-websocket headers: ${OBS_WEBSOCKET_INCLUDE_DIR}")
+  else()
+    message(WARNING "obs-websocket headers not found, websocket support disabled")
+    set(ENABLE_WEBSOCKET OFF)
+  endif()
+endif()
+
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   ./src/pch.h
   ./src/obs-multi-rtmp.h
@@ -55,11 +68,16 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
   ./src/protocols.cpp
   ./src/helpers.h
   ./src/helpers.cpp
+  ./src/ws_vendor.hpp
+  ./src/ws_vendor.cpp
+  ./src/multi-output-widget.h
+  ./src/multi-output-widget.cpp
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
   ./dep/nlohmann-json
   .deps/obs-studio-32.2.1/libobs
+  ./src
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
