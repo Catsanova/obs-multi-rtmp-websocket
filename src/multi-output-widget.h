@@ -1,12 +1,17 @@
 #pragma once
 
+#include <functional>
 #include <list>
+#include <memory>
 #include <string>
 
 #include <QVBoxLayout>
 
 #include "pch.h"
 #include "push-widget.h"
+
+// Object name / dock id of the plugin dock (looked up by the websocket vendor).
+inline constexpr const char* MULTI_RTMP_DOCK_ID = "obs-multi-rtmp-dock";
 
 class MultiOutputWidget : public QWidget
 {
@@ -39,6 +44,8 @@ public:
     bool UpdateSyncStart(const QString& targetId, bool syncStart);
     bool UpdateSyncStop(const QString& targetId, bool syncStop);
     PushWidget* FindPushWidgetById(const QString& targetId);
+    // Looks up by id when given, otherwise by name. Returns nullptr if neither matches.
+    PushWidget* FindByIdOrName(const QString& id, const QString& name);
 
 private:
     // Main widget of this module's dock
@@ -52,4 +59,8 @@ private:
 
     void DeletePushWidget(const std::string& targetId);
     PushWidget* AddPushWidget(const std::string& targetId);
+    // Assigns a fresh id to the config, registers it and creates its widget.
+    PushWidget* CreateTarget(std::shared_ptr<OutputTargetConfig> target);
+    // Applies mutate to the target's config, refreshes its widget and saves.
+    bool MutateTarget(const QString& targetId, std::function<void(OutputTargetConfig&)> mutate);
 };

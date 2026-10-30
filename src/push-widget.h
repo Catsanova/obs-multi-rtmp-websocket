@@ -6,8 +6,7 @@
 class PushWidget : public QWidget {
     Q_OBJECT
 public:
-    // targetId is unused by the base; the implementation resolves its own config.
-    explicit PushWidget(const std::string& targetId, QWidget* parent = 0);
+    explicit PushWidget(QWidget* parent = nullptr);
     virtual ~PushWidget() {}
     virtual bool ShowEditDlg() = 0;
     virtual void StartStreaming() = 0;
@@ -23,8 +22,6 @@ public:
 
     // Accessors used by the obs-websocket vendor API (ws_vendor.cpp).
     // All must be called on the UI thread.
-    virtual QString GetTargetId() const = 0;
-    virtual QString GetTargetName() const = 0;
     virtual QString GetStatusText() const = 0;
     virtual OutputTargetConfigPtr GetConfig() const = 0;
     // Re-reads the (possibly externally modified) config into the widget.

@@ -1,13 +1,7 @@
 ﻿#include "pch.h"
 
+#include <functional>
 #include <list>
-#include <regex>
-#include <filesystem>
-#include <unordered_map>
-
-#include <QFileDialog>
-#include <QFile>
-#include <QIODevice>
 
 #include "push-widget.h"
 #include "plugin-support.h"
@@ -15,10 +9,6 @@
 #include "output-config.h"
 #include "multi-output-widget.h"
 #include "ws_vendor.hpp"
-
-#ifdef _WIN32
-#include <Windows.h>
-#endif
 
 #define ConfigSection "obs-multi-rtmp"
 
@@ -61,8 +51,8 @@ bool obs_module_load()
     MultiRTMPWebsocketVendor::Instance();
 
     auto dock = new MultiOutputWidget();
-    dock->setObjectName("obs-multi-rtmp-dock");
-    if (!obs_frontend_add_dock_by_id("obs-multi-rtmp-dock", obs_module_text("Title"), dock))
+    dock->setObjectName(MULTI_RTMP_DOCK_ID);
+    if (!obs_frontend_add_dock_by_id(MULTI_RTMP_DOCK_ID, obs_module_text("Title"), dock))
     {
         delete dock;
         return false;

@@ -1,6 +1,7 @@
 #include "multi-output-widget.h"
 
 #include <algorithm>
+#include <functional>
 #include <list>
 #include <unordered_map>
 
@@ -14,6 +15,7 @@
 #include "push-widget.h"
 #include "plugin-support.h"
 #include "output-config.h"
+#include "protocols.h"
 
 class OutputsListWidget : public QListWidget
 {
@@ -99,16 +101,11 @@ MultiOutputWidget::MultiOutputWidget(QWidget* parent)
     // init widget
     auto addButton = new QPushButton(obs_module_text("Btn.NewTarget"), container_);
     QObject::connect(addButton, &QPushButton::clicked, [this]() {
-        auto& global = GlobalMultiOutputConfig();
-        auto newId = GenerateId(global);
-        auto target = std::make_shared<OutputTargetConfig>();
-        target->id = newId;
-        global.targets.emplace_back(target);
-        auto pushWidget = AddPushWidget(newId);
+        auto pushWidget = CreateTarget(std::make_shared<OutputTargetConfig>());
         if (pushWidget->ShowEditDlg()) {
             SaveConfig();
         } else {
-            DeletePushWidget(newId);
+            DeletePushWidget(pushWidget->GetConfig()->id);
         }
     });
     layout_->addWidget(addButton);
@@ -540,22 +537,46 @@ namespace {
 std::string NormalizeProtocol(const QString& protocol)
 {
     const QString p = protocol.trimmed().toLower();
+    std::string id;
     if (p.isEmpty() || p == "rtmp" || p == "rtmps")
-        return "RTMP";
-    if (p == "srt" || p == "rist" || p == "srt_rist" || p == "srt/rist")
-        return "SRT_RIST";
-    if (p == "whip")
-        return "WHIP";
-    return {};
+        id = "RTMP";
+    else if (p == "srt" || p == "rist" || p == "srt/rist")
+        id = "SRT_RIST";
+    else
+        id = tostdu8(p.toUpper());
+    return GetProtocolInfos()->GetInfo(id.c_str()) ? id : std::string();
 }
 
 // Name of the service parameter holding the stream key for a protocol.
 const char* StreamKeyParamName(const std::string& protocol)
 {
-    return protocol == "WHIP" ? "bearer_token" : "key";
+    return protocol == "WHIP" ? SERVICE_PARAM_BEARER_TOKEN : SERVICE_PARAM_STREAM_KEY;
 }
 
 } // namespace
+
+PushWidget* MultiOutputWidget::CreateTarget(std::shared_ptr<OutputTargetConfig> target)
+{
+    auto& global = GlobalMultiOutputConfig();
+    target->id = GenerateId(global);
+    global.targets.emplace_back(target);
+    return AddPushWidget(target->id);
+}
+
+bool MultiOutputWidget::MutateTarget(const QString& targetId, std::function<void(OutputTargetConfig&)> mutate)
+{
+    auto widget = FindPushWidgetById(targetId);
+    auto config = widget ? widget->GetConfig() : nullptr;
+    if (!config) {
+        blog(LOG_WARNING, TAG "Target not found: %s", targetId.toUtf8().constData());
+        return false;
+    }
+
+    mutate(*config);
+    widget->UpdateUI();
+    SaveConfig();
+    return true;
+}
 
 bool MultiOutputWidget::AddNewTarget(const QString& name, const QString& protocol)
 {
@@ -570,15 +591,10 @@ bool MultiOutputWidget::AddNewTarget(const QString& name, const QString& protoco
         return false;
     }
 
-    auto& global = GlobalMultiOutputConfig();
-    auto newId = GenerateId(global);
     auto target = std::make_shared<OutputTargetConfig>();
-    target->id = newId;
     target->name = tostdu8(name);
     target->protocol = normalized;
-    global.targets.emplace_back(target);
-
-    AddPushWidget(newId);
+    CreateTarget(target);
     SaveConfig();
 
     blog(LOG_INFO, TAG "Added new target: %s (Protocol: %s)", target->name.c_str(), normalized.c_str());
@@ -588,25 +604,16 @@ bool MultiOutputWidget::AddNewTarget(const QString& name, const QString& protoco
 bool MultiOutputWidget::CloneTarget(const QString& sourceId, const QString& newName, const QString& newStreamKey)
 {
     auto source = FindPushWidgetById(sourceId);
-    if (!source)
-        return false;
-    auto sourceConfig = source->GetConfig();
+    auto sourceConfig = source ? source->GetConfig() : nullptr;
     if (!sourceConfig)
         return false;
 
-    auto& global = GlobalMultiOutputConfig();
-    auto newId = GenerateId(global);
-
     auto target = std::make_shared<OutputTargetConfig>(*sourceConfig);
-    target->id = newId;
     target->name = tostdu8(newName);
-
-    if (!newStreamKey.isEmpty()) {
+    if (!newStreamKey.isEmpty())
         target->serviceParam[StreamKeyParamName(target->protocol)] = tostdu8(newStreamKey);
-    }
 
-    global.targets.emplace_back(target);
-    AddPushWidget(newId);
+    CreateTarget(target);
     SaveConfig();
     return true;
 }
@@ -618,16 +625,9 @@ bool MultiOutputWidget::UpdateTargetName(const QString& targetId, const QString&
         return false;
     }
 
-    auto widget = FindPushWidgetById(targetId);
-    if (!widget || !widget->GetConfig()) {
-        blog(LOG_WARNING, TAG "UpdateTargetName failed: Target not found %s", targetId.toUtf8().constData());
-        return false;
-    }
-
-    widget->GetConfig()->name = tostdu8(newName);
-    widget->UpdateUI();
-    SaveConfig();
-    return true;
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) {
+        config.name = tostdu8(newName);
+    });
 }
 
 bool MultiOutputWidget::UpdateTargetStreamKey(const QString& targetId, const QString& streamKey)
@@ -637,16 +637,9 @@ bool MultiOutputWidget::UpdateTargetStreamKey(const QString& targetId, const QSt
         return false;
     }
 
-    auto widget = FindPushWidgetById(targetId);
-    auto config = widget ? widget->GetConfig() : nullptr;
-    if (!config) {
-        blog(LOG_WARNING, TAG "UpdateStreamKey failed: Target not found %s", targetId.toUtf8().constData());
-        return false;
-    }
-
-    config->serviceParam[StreamKeyParamName(config->protocol)] = tostdu8(streamKey);
-    SaveConfig();
-    return true;
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) {
+        config.serviceParam[StreamKeyParamName(config.protocol)] = tostdu8(streamKey);
+    });
 }
 
 bool MultiOutputWidget::UpdateTargetServiceParam(const QString& targetId, const QString& key, const QString& value)
@@ -656,28 +649,19 @@ bool MultiOutputWidget::UpdateTargetServiceParam(const QString& targetId, const 
         return false;
     }
 
-    auto widget = FindPushWidgetById(targetId);
-    auto config = widget ? widget->GetConfig() : nullptr;
-    if (!config) {
-        blog(LOG_WARNING, TAG "UpdateServiceParam failed: Target not found %s", targetId.toUtf8().constData());
-        return false;
-    }
-
-    const auto keyStr = tostdu8(key);
-    const auto valueStr = tostdu8(value);
-    if (valueStr == "true" || valueStr == "false")
-        config->serviceParam[keyStr] = (valueStr == "true");
-    else
-        config->serviceParam[keyStr] = valueStr;
-
-    SaveConfig();
-    return true;
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) {
+        const auto keyStr = tostdu8(key);
+        const auto valueStr = tostdu8(value);
+        if (valueStr == "true" || valueStr == "false")
+            config.serviceParam[keyStr] = (valueStr == "true");
+        else
+            config.serviceParam[keyStr] = valueStr;
+    });
 }
 
 bool MultiOutputWidget::DeleteTarget(const QString& targetId)
 {
-    auto widget = FindPushWidgetById(targetId);
-    if (!widget)
+    if (!FindPushWidgetById(targetId))
         return false;
 
     // Destroying the widget releases (and force-stops) its output.
@@ -688,36 +672,35 @@ bool MultiOutputWidget::DeleteTarget(const QString& targetId)
 
 bool MultiOutputWidget::UpdateSyncStart(const QString& targetId, bool syncStart)
 {
-    auto widget = FindPushWidgetById(targetId);
-    auto config = widget ? widget->GetConfig() : nullptr;
-    if (!config) {
-        blog(LOG_WARNING, TAG "UpdateSyncStart failed: Target not found %s", targetId.toUtf8().constData());
-        return false;
-    }
-
-    config->syncStart = syncStart;
-    SaveConfig();
-    return true;
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) { config.syncStart = syncStart; });
 }
 
 bool MultiOutputWidget::UpdateSyncStop(const QString& targetId, bool syncStop)
 {
-    auto widget = FindPushWidgetById(targetId);
-    auto config = widget ? widget->GetConfig() : nullptr;
-    if (!config) {
-        blog(LOG_WARNING, TAG "UpdateSyncStop failed: Target not found %s", targetId.toUtf8().constData());
-        return false;
-    }
-
-    config->syncStop = syncStop;
-    SaveConfig();
-    return true;
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) { config.syncStop = syncStop; });
 }
 
 PushWidget* MultiOutputWidget::FindPushWidgetById(const QString& targetId)
 {
+    for (int row = 0; row < outputsContainer_->count(); ++row) {
+        auto item = outputsContainer_->item(row);
+        if (!item || item->data(Qt::UserRole).toString() != targetId)
+            continue;
+        return dynamic_cast<PushWidget*>(outputsContainer_->itemWidget(item));
+    }
+    return nullptr;
+}
+
+PushWidget* MultiOutputWidget::FindByIdOrName(const QString& id, const QString& name)
+{
+    if (!id.isEmpty())
+        return FindPushWidgetById(id);
+    if (name.isEmpty())
+        return nullptr;
+
     for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == targetId)
+        auto config = widget->GetConfig();
+        if (config && QString::fromStdString(config->name) == name)
             return widget;
     }
     return nullptr;

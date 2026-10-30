@@ -14,10 +14,9 @@
 
 #include "obs.hpp"
 
-PushWidget::PushWidget(const std::string& targetId, QWidget* parent)
+PushWidget::PushWidget(QWidget* parent)
     : QWidget(parent)
 {
-    (void)targetId;
 }
 
 class SharedSceneView final
@@ -675,7 +674,7 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
 
 public:
     PushWidgetImpl(const std::string& targetid, QWidget* parent = 0)
-        : PushWidget(targetid, parent)
+        : PushWidget(parent)
         , targetid_(targetid)
     {
         QObject::setObjectName("push-widget");
@@ -909,8 +908,6 @@ public:
 
     bool GetEnabled() override { return config_->enabled; }
 
-    QString GetTargetId() const override { return config_ ? QString::fromStdString(config_->id) : QString(); }
-    QString GetTargetName() const override { return config_ ? QString::fromStdString(config_->name) : QString(); }
     QString GetStatusText() const override { return msg_ ? msg_->text() : QString(); }
     OutputTargetConfigPtr GetConfig() const override { return config_; }
     void UpdateUI() override { if (config_) LoadConfig(); }
