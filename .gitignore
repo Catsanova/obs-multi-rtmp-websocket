@@ -19,6 +19,7 @@
 !LICENSE
 !README.md
 !FLATPAK.md
+!/obs-websocket-tester.html
 
 # Exclude lock files
 *.lock.json

@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>OBS Multi-RTMP WebSocket Tester by romestylez</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: monospace; background: #1a1a1a; color: #e0e0e0; padding: 20px; }
+h1 { font-size: 16px; font-weight: bold; margin-bottom: 16px; color: #fff; }
+h2 { font-size: 13px; font-weight: bold; color: #aaa; margin-bottom: 6px; }
+label { font-size: 12px; color: #999; display: block; margin-bottom: 4px; }
+input, select { width: 100%; background: #2a2a2a; border: 1px solid #444; color: #e0e0e0; padding: 6px 8px; border-radius: 4px; font-family: monospace; font-size: 13px; }
+button { background: #2a2a2a; border: 1px solid #555; color: #e0e0e0; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-family: monospace; font-size: 13px; }
+button:hover { background: #333; }
+button:disabled { opacity: 0.4; cursor: default; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.card { background: #222; border: 1px solid #333; border-radius: 8px; padding: 14px; margin-bottom: 12px; }
+.log { background: #111; border: 1px solid #333; border-radius: 4px; padding: 10px; height: 220px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-size: 12px; }
+.raw { background: #111; border: 1px solid #333; border-radius: 4px; padding: 10px; height: 160px; overflow-y: auto; white-space: pre; font-size: 12px; color: #e0e0e0; resize: vertical; }
+.rx { color: #4ade80; }
+.tx { color: #60a5fa; }
+.err { color: #f87171; }
+.info { color: #888; }
+#status { font-size: 12px; color: #888; margin-left: 10px; }
+#status.ok { color: #4ade80; }
+#status.err { color: #f87171; }
+.btns { display: flex; align-items: center; margin-top: 12px; gap: 8px; }
+.raw-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.copy-btn { font-size: 11px; padding: 3px 8px; }
+.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+</style>
+</head>
+<body>
+<h1>OBS Multi-RTMP WebSocket Tester by romestylez</h1>
+
+<div class="card">
+  <div class="row">
+    <div>
+      <label>Host</label>
+      <input id="host" value="localhost" />
+    </div>
+    <div>
+      <label>Port</label>
+      <input id="port" value="4455" />
+    </div>
+  </div>
+  <div style="margin-top:10px;">
+    <label>Password</label>
+    <input id="pass" type="password" placeholder="OBS WebSocket Passwort" />
+  </div>
+  <div class="btns">
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <span id="status">disconnected</span>
+  </div>
+</div>
+
+<div class="card">
+  <div style="margin-bottom:10px;">
+    <label>Request</label>
+    <select id="reqType">
+      <option value="ListTargets">ListTargets – alle Targets auflisten</option>
+      <option value="GetTargetState">GetTargetState – Status eines Targets</option>
+      <option value="StartTarget">StartTarget – Target starten</option>
+      <option value="StopTarget">StopTarget – Target stoppen</option>
+      <option value="ToggleTarget">ToggleTarget – Target an/aus</option>
+      <option value="StartAll">StartAll – alle starten</option>
+      <option value="StopAll">StopAll – alle stoppen</option>
+      <option value="GetTargetStats">GetTargetStats – Live-Stats</option>
+    </select>
+  </div>
+  <div style="margin-bottom:10px;">
+    <label>Target Name (nur für requests die ein Target brauchen)</label>
+    <input id="targetName" placeholder="z.B. Kick oder Twitch" />
+  </div>
+  <button id="btnSend" disabled>Send Request</button>
+</div>
+
+<div class="card">
+  <div class="raw-row">
+    <div>
+      <div class="panel-header">
+        <h2>Gesendeter Request (JSON)</h2>
+        <button class="copy-btn" onclick="copyRaw('rawTx')">Copy</button>
+      </div>
+      <div class="raw" id="rawTx">– noch kein Request gesendet –</div>
+    </div>
+    <div>
+      <div class="panel-header">
+        <h2>Empfangene Response (JSON)</h2>
+        <button class="copy-btn" onclick="copyRaw('rawRx')">Copy</button>
+      </div>
+      <div class="raw" id="rawRx">– noch keine Response –</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+    <h2 style="margin:0;">Log</h2>
+    <button onclick="document.getElementById('log').innerHTML=''">Clear</button>
+  </div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+let ws = null;
+let identified = false;
+
+const log = (msg, cls='info') => {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = cls;
+  const ts = new Date().toLocaleTimeString();
+  line.textContent = `[${ts}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+};
+
+const setStatus = (txt, cls='') => {
+  const el = document.getElementById('status');
+  el.textContent = txt;
+  el.className = cls;
+};
+
+const copyRaw = (id) => {
+  const text = document.getElementById(id).textContent;
+  navigator.clipboard.writeText(text).then(() => log('Copied to clipboard', 'info'));
+};
+
+async function buildAuth(password, challenge, salt) {
+  const enc = new TextEncoder();
+  const b64 = async (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const hash = async (data) => crypto.subtle.digest('SHA-256', enc.encode(data));
+  const secret = await b64(await hash(password + salt));
+  return await b64(await hash(secret + challenge));
+}
+
+document.getElementById('btnConnect').addEventListener('click', () => {
+  if (ws) { ws.close(); }
+  const host = document.getElementById('host').value;
+  const port = document.getElementById('port').value;
+  log(`Connecting to ws://${host}:${port}...`);
+  ws = new WebSocket(`ws://${host}:${port}`);
+
+  ws.onopen = () => log('Connected, waiting for Hello...', 'info');
+
+  ws.onmessage = async (e) => {
+    const msg = JSON.parse(e.data);
+    log(`← op:${msg.op}`, 'rx');
+
+    if (msg.op === 0) {
+      const pass = document.getElementById('pass').value;
+      let identify = { op: 1, d: { rpcVersion: 1 } };
+      if (msg.d.authentication && pass) {
+        const auth = await buildAuth(pass, msg.d.authentication.challenge, msg.d.authentication.salt);
+        identify.d.authentication = auth;
+      }
+      ws.send(JSON.stringify(identify));
+      log(`→ Identify sent`, 'tx');
+    }
+
+    if (msg.op === 2) {
+      identified = true;
+      setStatus('connected ✓', 'ok');
+      document.getElementById('btnSend').disabled = false;
+      document.getElementById('btnDisconnect').disabled = false;
+      document.getElementById('btnConnect').disabled = true;
+      log('Identified OK – ready', 'info');
+    }
+
+    if (msg.op === 7) {
+      const pretty = JSON.stringify(msg.d, null, 2);
+      document.getElementById('rawRx').textContent = pretty;
+      log(`Response received`, 'rx');
+    }
+  };
+
+  ws.onerror = () => { log('WebSocket error', 'err'); setStatus('error', 'err'); };
+  ws.onclose = () => {
+    log('Disconnected', 'err');
+    setStatus('disconnected', 'err');
+    identified = false;
+    document.getElementById('btnSend').disabled = true;
+    document.getElementById('btnDisconnect').disabled = true;
+    document.getElementById('btnConnect').disabled = false;
+    ws = null;
+  };
+});
+
+document.getElementById('btnDisconnect').addEventListener('click', () => {
+  if (ws) ws.close();
+});
+
+document.getElementById('btnSend').addEventListener('click', () => {
+  if (!ws || !identified) return;
+  const reqType = document.getElementById('reqType').value;
+  const targetName = document.getElementById('targetName').value;
+  const reqData = {};
+  const needsTarget = ['GetTargetState','StartTarget','StopTarget','ToggleTarget','GetTargetStats'];
+  if (targetName && needsTarget.includes(reqType)) {
+    reqData.name = targetName;
+  }
+  const msg = {
+    op: 6,
+    d: {
+      requestType: 'CallVendorRequest',
+      requestId: 'req-' + Date.now(),
+      requestData: {
+        vendorName: 'romestylez.multi_rtmp',
+        requestType: reqType,
+        requestData: reqData
+      }
+    }
+  };
+  ws.send(JSON.stringify(msg));
+  document.getElementById('rawTx').textContent = JSON.stringify(msg, null, 2);
+  document.getElementById('rawRx').textContent = '– warte auf Response –';
+  log(`→ ${reqType} gesendet`, 'tx');
+});
+</script>
+</body>
+</html>

@@ -52,3 +52,116 @@ If you find this tool useful and want to doante, here is the link. (Please do no
 
 This project uses obs-plugintemplate.   
 Please refer to obs-plugintemplate to understand how it works.
+
+
+# WebSocket API (fork additions)
+
+This fork adds an obs-websocket vendor API (`romestylez.multi_rtmp`) for remote control of targets. Requests that start a target respect the per-target "enabled" flag: disabled targets are not started and `StartTarget`/`ToggleTarget` report an error.
+
+### 🚀 Features
+- Full control over RTMP targets via WebSocket
+- Start / Stop individual or all targets
+- Dynamic target management (add, clone, delete)
+- Sync with OBS streaming state
+- Retrieve detailed stats per target
+
+------------------------------------------------------------------------
+
+### 🔌 WebSocket API
+
+**Vendor Name:** `romestylez.multi_rtmp`
+
+#### 📡 Target Management
+- `ListTargets` – Get all configured RTMP targets
+- `GetTargetState` – Get current state of a specific target
+- `AddTarget` – Add a new target
+- `CloneTarget` – Clone an existing target
+- `DeleteTarget` – Delete a target
+
+#### ▶️ Stream Control
+- `StartTarget` – Start a specific target
+- `StopTarget` – Stop a specific target
+- `ToggleTarget` – Toggle start/stop state
+- `StartAll` – Start all targets
+- `StopAll` – Stop all targets
+
+#### ⚙️ Configuration
+- `UpdateTargetName` – Rename a target
+- `UpdateStreamKey` – Update stream key
+- `UpdateServiceParam` – Update service parameters
+- `UpdateSyncStart` – Sync start with OBS
+- `UpdateSyncStop` – Sync stop with OBS
+
+#### 📊 Monitoring
+- `GetTargetStats` – Retrieve stats for a target
+
+------------------------------------------------------------------------
+
+### 🧪 WebSocket Tester
+
+A standalone HTML tester is included (`obs-websocket-tester.html`) that lets you test all API calls directly from your browser – no extra tools needed.
+
+**Features:**
+- Connects to OBS WebSocket with automatic authentication
+- Dropdown for all available requests
+- Shows raw sent JSON and received response side by side
+- Copy buttons for easy use in Streamer.bot or other tools
+
+**Usage:**
+1. Copy `obs-websocket-tester.html` to your OBS machine
+2. Open it in any browser (double-click)
+3. Enter your OBS WebSocket host, port and password
+4. Click **Connect** and start sending requests
+
+**Example – Stop the Kick target:**
+
+```json
+{
+  "op": 6,
+  "d": {
+    "requestType": "CallVendorRequest",
+    "requestId": "my-request-1",
+    "requestData": {
+      "vendorName": "romestylez.multi_rtmp",
+      "requestType": "StopTarget",
+      "requestData": {
+        "name": "Kick"
+      }
+    }
+  }
+}
+```
+
+------------------------------------------------------------------------
+
+### Linux build
+
+Ubuntu 24.04 provides OBS packages new enough to build this plugin.
+
+```bash
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  cmake ninja-build pkg-config jq git ccache zsh build-essential \
+  qt6-base-dev libobs-dev obs-studio
+
+cmake --preset ubuntu-x86_64
+cmake --build --preset ubuntu-x86_64 -j2
+```
+
+Expected output:
+
+```text
+build_x86_64/obs-multi-rtmp.so
+```
+
+You can also run the package-based build in Docker:
+
+```bash
+docker build -f Dockerfile.linux-build -t obs-multi-rtmp-linux-build .
+```
+
+Runtime loading was smoke-tested on OBS 32.1.2 from the official OBS Project
+PPA, including websocket vendor registration for `romestylez.multi_rtmp`.
+
+------------------------------------------------------------------------
+
