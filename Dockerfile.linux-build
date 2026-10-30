@@ -1,0 +1,26 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ccache \
+        cmake \
+        git \
+        jq \
+        libobs-dev \
+        ninja-build \
+        obs-studio \
+        pkg-config \
+        qt6-base-dev \
+        zsh \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+
+COPY . .
+
+RUN cmake --preset ubuntu-x86_64 \
+    && cmake --build --preset ubuntu-x86_64 -j2 \
+    && test -f build_x86_64/obs-multi-rtmp.so

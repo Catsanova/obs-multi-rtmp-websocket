@@ -6,6 +6,7 @@
 !/build-aux
 !/cmake
 !/data
+!/dep
 !/flatpak
 !/src
 !.clang-format
@@ -14,6 +15,7 @@
 !buildspec.json
 !CMakeLists.txt
 !CMakePresets.json
+!Dockerfile.linux-build
 !LICENSE
 !README.md
 !FLATPAK.md
