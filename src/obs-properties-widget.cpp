@@ -53,7 +53,11 @@ namespace {
                 edit_->setEchoMode(QLineEdit::EchoMode::Password);
                 layout->addWidget(eye_ = new QCheckBox(u8"👀", this));
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+                QObject::connect(eye_, &QCheckBox::checkStateChanged, [=](Qt::CheckState newstate) {
+#else
                 QObject::connect(eye_, &QCheckBox::stateChanged, [=](int newstate) {
+#endif
                     if (newstate == Qt::CheckState::Checked) {
                         edit_->setEchoMode(QLineEdit::EchoMode::Normal);
                     } else {
@@ -92,7 +96,11 @@ namespace {
             switch(propType = obs_property_get_type(p)) {
                 case OBS_PROPERTY_BOOL: {
                     auto cb = new QCheckBox(parent);
-                    QObject::connect(cb, &QCheckBox::stateChanged, [=]() {
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+                    QObject::connect(cb, &QCheckBox::checkStateChanged, [=](Qt::CheckState) {
+#else
+                    QObject::connect(cb, &QCheckBox::stateChanged, [=](int) {
+#endif
                         updater->UpdateUI();
                     });
                     ctrl = cb;
@@ -143,9 +151,9 @@ namespace {
         }
 
         ~PropertyWidget() {
-            if (label) 
+            if (label)
                 delete label;
-            if (ctrl) 
+            if (ctrl)
                 delete ctrl;
         }
 
@@ -280,14 +288,15 @@ namespace {
 
     class QPropertiesWidgetImpl: virtual public QWidget, public QPropertiesWidget, public UpdateHandler {
         std::unordered_map<std::string, std::shared_ptr<PropertyWidget>> propwids;
-        obs_properties* props;
+        OBSPropertiesPtr props;
         OBSData settings;
         OBSData orig_settings;
+        std::function<void()> geometryChangeCallback_;
 
     public:
-        QPropertiesWidgetImpl(obs_properties* props, obs_data* p_settings, QWidget* parent)
+        QPropertiesWidgetImpl(OBSPropertiesPtr props, obs_data* p_settings, QWidget* parent)
             : QWidget(parent)
-            , props(props)
+            , props(std::move(props))
             , orig_settings(p_settings)
         {
             obs_data_release(p_settings);
@@ -302,15 +311,15 @@ namespace {
 
             obs_data_apply(settings, orig_settings);
 
-            obs_properties_apply_settings(props, settings);
+            obs_properties_apply_settings(props.get(), settings);
             
             UpdateUI();
         }
 
-        ~QPropertiesWidgetImpl()
-        {
-            if (props)
-                obs_properties_destroy(props);
+        ~QPropertiesWidgetImpl() {}
+
+        void SetGeometryChangeCallback(std::function<void()> callback) override {
+            geometryChangeCallback_ = std::move(callback);
         }
 
         void LoadProperties() {
@@ -331,7 +340,8 @@ namespace {
             layout->setColumnStretch(0, 0);
             layout->setColumnStretch(1, 1);
             layout->setContentsMargins(0, 0, 0, 0);
-            auto x = obs_properties_first(props);
+            layout->setSizeConstraint(QLayout::SetMinAndMaxSize);
+            auto x = obs_properties_first(props.get());
             int currow = 0;
             do {
                 if (obs_property_visible(x) == false)
@@ -358,6 +368,7 @@ namespace {
             if (oldLayout)
                 delete oldLayout;
             setLayout(layout);
+            NotifyGeometryChanged();
         }
 
         bool isUpdating = false;
@@ -371,7 +382,7 @@ namespace {
                 x.second->SaveData(settings);
             }
 
-            obs_properties_apply_settings(props, settings);
+            obs_properties_apply_settings(props.get(), settings);
             LoadProperties();
 
             for(auto& x: propwids)
@@ -385,10 +396,18 @@ namespace {
         void Save() {
             obs_data_apply(orig_settings, settings);
         }
+
+    private:
+        void NotifyGeometryChanged() {
+            updateGeometry();
+            adjustSize();
+            if (geometryChangeCallback_)
+                geometryChangeCallback_();
+        }
     };
 };
 
 
-QPropertiesWidget* createPropertyWidget(obs_properties* props, obs_data* settings, QWidget* parent) {
-    return new QPropertiesWidgetImpl(props, settings, parent);
+QPropertiesWidget* createPropertyWidget(OBSPropertiesPtr props, obs_data* settings, QWidget* parent) {
+    return new QPropertiesWidgetImpl(std::move(props), settings, parent);
 }

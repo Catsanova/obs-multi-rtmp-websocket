@@ -17,6 +17,8 @@
 #include <QThread>
 #include <QTabWidget>
 #include <QLineEdit>
+#include <QListWidget>
+#include <QSizePolicy>
 #include <QTimer>
 #include <QMessageBox>
 #include <QComboBox>
@@ -24,20 +26,10 @@
 #include <QGroupBox>
 #include <QAction>
 
-// added for websocket
-#include <QJsonObject>
-#include <QJsonArray>
-#include <QJsonDocument>
-
 #include "obs-multi-rtmp.h"
 #include "obs-module.h"
 #include "obs-frontend-api.h"
 #include "util/config-file.h"
-
-// added for websocket
-#ifdef ENABLE_WEBSOCKET
-#include "obs-websocket-api.h"
-#endif
 
 #define TAG "[obs-multi-rtmp] "
 

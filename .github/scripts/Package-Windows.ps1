@@ -77,7 +77,7 @@ function Package {
         Log-Information "Adding directory: ${SourceDir} to ${DestDir}"
         $Entries = Get-ChildItem -Path $SourceDir -Recurse
         foreach( $Entry in $Entries ) {
-            $RelativePath = $Entry.FullName.Substring($SourceDir.Length).TrimStart('\')
+            $RelativePath = $Entry.FullName.Substring($SourceDir.Length).TrimStart('\') -replace '\\', '/'
             $ZipEntryPath = "$DestDir/${RelativePath}"
             if ( $Entry.PSIsContainer -eq $false ) {
                 Log-Information "Adding file entry: ${ZipEntryPath}"
@@ -96,11 +96,19 @@ function Package {
     Log-Group
 
     $NsiFile = "${ProjectRoot}/installer.nsi"
+    $InstallerSource = Join-Path -Path $ProjectRoot -ChildPath "release/${Configuration}/${ProductName}"
+
+    if ( ! ( Test-Path -LiteralPath $InstallerSource -PathType Container ) ) {
+        throw "Installer source directory does not exist: ${InstallerSource}"
+    }
+
+    $InstallerSource = (Resolve-Path -LiteralPath $InstallerSource).ProviderPath
+
     Log-Information 'Creating NSIS installer...'
 
     Push-Location -Stack BuildTemp
     Ensure-Location -Path "${ProjectRoot}/release"
-    Invoke-External "makensis.exe" ${NsiFile}
+    Invoke-External "makensis.exe" "/DPLUGIN_SOURCE_DIR=${InstallerSource}" ${NsiFile}
     Copy-Item -Path "${ProjectRoot}/obs-multi-rtmp-setup.exe" -Destination "${OutputName}-Installer.exe"
     Pop-Location -Stack BuildTemp
 

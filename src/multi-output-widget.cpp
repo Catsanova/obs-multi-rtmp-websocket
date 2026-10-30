@@ -1,17 +1,92 @@
 #include "multi-output-widget.h"
-#include "push-widget.h"
-#include "output-config.h"
-#include "plugin-support.h"
-#include <QScrollArea>
+
+#include <algorithm>
+#include <functional>
+#include <list>
+#include <unordered_map>
+
+#include <QFileDialog>
+#include <QFile>
+#include <QIODevice>
+#include <QDialog>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
-#include <QGridLayout>
-#include <QPushButton>
-#include <QLabel>
-#include <QMessageBox>
-#include <QDialog>
-#include <QTabWidget>
-#include <QMainWindow>
+
+#include "push-widget.h"
+#include "plugin-support.h"
+#include "output-config.h"
+#include "protocols.h"
+
+class OutputsListWidget : public QListWidget
+{
+public:
+    using QListWidget::QListWidget;
+
+    QSize sizeHint() const override
+    {
+        QSize hint = QListWidget::sizeHint();
+        hint.setHeight(ContentHeight());
+        return hint;
+    }
+
+    QSize minimumSizeHint() const override
+    {
+        return sizeHint();
+    }
+
+protected:
+    bool event(QEvent *event) override
+    {
+        const bool handled = QListWidget::event(event);
+
+        switch (event->type()) {
+        case QEvent::FontChange:
+        case QEvent::LayoutRequest:
+        case QEvent::PolishRequest:
+        case QEvent::Show:
+        case QEvent::StyleChange:
+            RefreshItemSizeHints();
+            updateGeometry();
+            break;
+        default:
+            break;
+        }
+
+        return handled;
+    }
+
+private:
+    void RefreshItemSizeHints()
+    {
+        for (int i = 0; i < count(); ++i) {
+            auto item = this->item(i);
+            auto widget = itemWidget(item);
+            if (item && widget)
+                item->setSizeHint(widget->sizeHint());
+        }
+    }
+
+    int ContentHeight() const
+    {
+        auto *widget = const_cast<OutputsListWidget *>(this);
+        widget->doItemsLayout();
+
+        int totalHeight = frameWidth() * 2;
+        const int itemCount = count();
+        for (int i = 0; i < itemCount; ++i) {
+            totalHeight += sizeHintForRow(i);
+        }
+
+        if (itemCount > 1) {
+            totalHeight += (itemCount - 1) * spacing();
+        }
+
+        return (std::max)(totalHeight, frameWidth() * 2);
+    }
+};
+
+
+
 
 MultiOutputWidget::MultiOutputWidget(QWidget* parent)
     : QWidget(parent)
@@ -21,26 +96,16 @@ MultiOutputWidget::MultiOutputWidget(QWidget* parent)
     container_ = new QWidget(&scroll_);
     layout_ = new QVBoxLayout(container_);
     layout_->setAlignment(Qt::AlignmentFlag::AlignTop);
+    layout_->setSizeConstraint(QLayout::SetMinAndMaxSize);
 
     // init widget
     auto addButton = new QPushButton(obs_module_text("Btn.NewTarget"), container_);
     QObject::connect(addButton, &QPushButton::clicked, [this]() {
-        auto& global = GlobalMultiOutputConfig();
-        auto newid = GenerateId(global);
-        auto target = std::make_shared<OutputTargetConfig>();
-        target->id = newid;
-        global.targets.emplace_back(target);
-        auto pushwidget = createPushWidget(newid, container_);
-        itemLayout_->addWidget(pushwidget);
-        if (pushwidget->ShowEditDlg())
+        auto pushWidget = CreateTarget(std::make_shared<OutputTargetConfig>());
+        if (pushWidget->ShowEditDlg()) {
             SaveConfig();
-        else {
-            auto it = std::find_if(global.targets.begin(), global.targets.end(), [newid](auto& x) {
-                return x->id == newid;
-            });
-            if (it != global.targets.end())
-                global.targets.erase(it);
-            delete pushwidget;
+        } else {
+            DeletePushWidget(pushWidget->GetConfig()->id);
         }
     });
     layout_->addWidget(addButton);
@@ -63,13 +128,58 @@ MultiOutputWidget::MultiOutputWidget(QWidget* parent)
         for (auto x : GetAllPushWidgets())
             x->StopStreaming();
     });
-    
-    // load config
-    itemLayout_ = new QVBoxLayout(container_);
-    LoadConfig();
-    layout_->addLayout(itemLayout_);
 
-    // donate section (unchanged)
+    // load and show outputs
+    outputsContainer_ = new OutputsListWidget(container_);
+    outputsContainer_->setDragDropMode(QAbstractItemView::InternalMove);
+    outputsContainer_->setSelectionMode(QAbstractItemView::SingleSelection);
+    outputsContainer_->setDropIndicatorShown(true);
+    outputsContainer_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Maximum);
+    outputsContainer_->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
+    outputsContainer_->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    outputsContainer_->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    outputsContainer_->setStyleSheet(
+        "QListWidget {"
+        "   padding: 0px;"
+        "   margin: 0px;"
+        "   border: none;"
+        "   background: transparent;"
+        "}"
+        "QListWidget::item:selected, QListWidget::item:active {"
+        "   border: none;"
+        "   background: transparent;"
+        "}"
+        "QListWidget::item:hover, QListWidget::item:hover:selected, QListWidget::item:hover:active {"
+        "   border: none;"
+        "   background: rgba(127, 127, 127, 0.1);"
+        "   cursor: move;"
+        "}"
+    );
+    LoadConfig();
+    connect(
+        outputsContainer_->model(),
+        &QAbstractItemModel::rowsMoved,
+        this,
+        &MultiOutputWidget::OnOutputMoved
+    );
+    layout_->addWidget(outputsContainer_);
+
+    // export / import config, so a target list (including stream keys)
+    // can be backed up or moved to another profile/PC instead of only
+    // ever living inside the current profile's obs-multi-rtmp.json
+    auto ioBtnContainer = new QWidget(this);
+    auto ioBtnLayout = new QHBoxLayout();
+    auto exportButton = new QPushButton(obs_module_text("Btn.ExportConfig"), ioBtnContainer);
+    ioBtnLayout->addWidget(exportButton);
+    auto importButton = new QPushButton(obs_module_text("Btn.ImportConfig"), ioBtnContainer);
+    ioBtnLayout->addWidget(importButton);
+    ioBtnContainer->setLayout(ioBtnLayout);
+    layout_->addWidget(ioBtnContainer);
+
+    QObject::connect(exportButton, &QPushButton::clicked, this, &MultiOutputWidget::ExportConfig);
+    QObject::connect(importButton, &QPushButton::clicked, this, &MultiOutputWidget::ImportConfig);
+
+    // donate
     if (std::string("\xe5\xa4\x9a\xe8\xb7\xaf\xe6\x8e\xa8\xe6\xb5\x81") == obs_module_text("Title"))
     {
         auto cr = new QWidget(container_);
@@ -100,16 +210,16 @@ MultiOutputWidget::MultiOutputWidget(QWidget* parent)
                 "AiAUdSAAAAAlwSFlzAAAuIwAALiMBeKU/dgAAAVtJREFUWMPNmEGugzAMRM0qx+CmIbkpx8gK1zM2/U"
                 "L66w4RogqvC5dhxqbm/6/TfgEuwzr8PNwnjhP7pgYNxR1r97XPhUvxjUsPztj0hkJ7O7c4m/V3gCg36"
                 "r5Q68uA7SHtaC8BlBbP2T4awFNzEaANOtSt4+EPEciEiKJn2eCZJSIQ5XbU5yFt+HNUfIgBNqFo6Grh"
-                "BDxttIQcoL5ICrsTbdAQWgBPIltxK7uVRaeLQToTFRMbb+JoYoAHjsG63UWXtFIQm2w/mV9x9vodUnC"
+                "BDxttIQcoL5ICrsTbdAYWgBPIltxK7uVRaeLQToTFRMbb+JoYoAHjsG63UWXtFIQm2w/mV9x9vodUnC"
                 "vCWfuiA+oqwaLH7Al8qL/aS4GA9I6zkz/bbFBSsHVKi++Dftg89YC53DDq8iLTJCSVgcq6DlMZGRkzm"
-                "pBtW2jRRH3flU3UIIacWBLduv0gxxxltGTaUtOFS4HVSJHnBp35jvAsbJnV/RbewWgtLVyAlODkjZSd"
+                "pBtW2jRRH3flU3UIIacWBLduv0gxzwltGTaUtOFS4HVSJHnBp35jvAsbJnV/RbewWgtLVyAlODkjZSd"
                 "eMrkNfsIwX3awYfuLLEaGKg/OvlAz+wXVruSNSgAAAAAElFTkSuQmCC";
             const char wechatpng[] = 
                 "iVBORw0KGgoAAAANSUhEUgAAAK8AAACtAQMAAAD8lL09AAAABlBMVEUAAAD///+l2Z/dAAAAAWJLR0Q"
                 "AiAUdSAAAAAlwSFlzAAAuIwAALiMBeKU/dgAAAbpJREFUSMe9l0GugzAMRI26yDJHyE3Si1WiEhcrN8"
                 "kRWLJA8Z9xaNUv/eUfUIXgqQtn4pkY87+ubv+Cd8O1T3g2y4unzveqxXf3BniUeLKa3XcxrnZr+32zg"
                 "iXPDvy0S/C04WYo4jpsKCK97FH2K3DovfqzoJzAX9sgwtFVNS/tvH03mwYPs6zb7PjDrf22lAZT6ugq"
-                "wwtaCzLYWLwO13yUUQl3N70yDSTFWOqCJbORsdloLYguxrSNgxyWhl3Z0l2LjWaZUE541qaRFUoM342"
+                "wwtaCzLYWLwO13yUUQl3N70yDSTFWOqCJbORsdloLYguxrSNgxyWhl3Z0l2LjWaZUE541qaRFUqM342"
                 "5sDTYdY5EZE1KjHU/z25+0UV3yi/GE4LeubHe0V9QYFZjEOhN70QOmp0JocSdGT82Nh+D7nrcQoHkDO"
                 "GOcmLnhXil3vAsy5nRWhS9SjGkhmMiddHIMO6580oMu5a0xpAC0aOSOHd0mC+jodjNnhyVqDH1Tj3Ts"
                 "0hEm3CGv7dYhDkdQGr0cOJxxquMM02GI44g+tKiqwwZVd4HugjHfOKxeEYvQ9jVOKawzrRnQkQSf4Yz"
@@ -162,42 +272,21 @@ MultiOutputWidget::MultiOutputWidget(QWidget* parent)
     fullLayout->addWidget(&scroll_, 0, 0);
 }
 
-// ✅ FIX: RefreshUI method (now declared as a slot)
-void MultiOutputWidget::RefreshUI() {
-    // Clear existing widgets from itemLayout_
-    QLayoutItem* item;
-    while ((item = itemLayout_->takeAt(0)) != nullptr) {
-        if (item->widget()) {
-            item->widget()->deleteLater();  // Use deleteLater for safety
-        }
-        delete item;
-    }
-    
-    // Reload the config
-    LoadConfig();
-    
-    // Force UI update
-    container_->adjustSize();
-    update();
-    
-    blog(LOG_INFO, TAG "UI refreshed successfully");
-}
-
-std::vector<PushWidget*> MultiOutputWidget::GetAllPushWidgets()
+std::list<PushWidget*> MultiOutputWidget::GetAllPushWidgets()
 {
-    std::vector<PushWidget*> result;
-    
-    // Check all widgets in the item layout
-    for (int i = 0; i < itemLayout_->count(); ++i) {
-        QLayoutItem* item = itemLayout_->itemAt(i);
-        if (item && item->widget()) {
-            PushWidget* pushWidget = qobject_cast<PushWidget*>(item->widget());
-            if (pushWidget) {
-                result.push_back(pushWidget);
-            }
+    std::list<PushWidget*> result;
+    for (int row = 0; row < outputsContainer_->count(); ++row) {
+        auto item = outputsContainer_->item(row);
+        if (!item) {
+            continue;
+        }
+
+        auto widget = outputsContainer_->itemWidget(item);
+        auto pushWidget = dynamic_cast<PushWidget*>(widget);
+        if (pushWidget) {
+            result.push_back(pushWidget);
         }
     }
-    
     return result;
 }
 
@@ -206,136 +295,339 @@ void MultiOutputWidget::SaveConfig()
     SaveMultiOutputConfig();
 }
 
+void MultiOutputWidget::ExportConfig()
+{
+    SaveConfig();
+
+    auto fileName = QFileDialog::getSaveFileName(
+        this,
+        obs_module_text("Btn.ExportConfig"),
+        "obs-multi-rtmp-config.json",
+        "JSON (*.json)"
+    );
+    if (fileName.isEmpty())
+        return;
+    if (!fileName.endsWith(".json", Qt::CaseInsensitive))
+        fileName += ".json";
+
+    auto content = SerializeMultiOutputConfig(GlobalMultiOutputConfig());
+
+    QFile file(fileName);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox(
+            QMessageBox::Icon::Critical,
+            obs_module_text("Notice.Title"),
+            obs_module_text("Error.ExportConfig"),
+            QMessageBox::StandardButton::Ok,
+            this
+        ).exec();
+        return;
+    }
+    file.write(content.c_str(), static_cast<qint64>(content.size()));
+}
+
+void MultiOutputWidget::ImportConfig()
+{
+    auto fileName = QFileDialog::getOpenFileName(
+        this,
+        obs_module_text("Btn.ImportConfig"),
+        QString(),
+        "JSON (*.json)"
+    );
+    if (fileName.isEmpty())
+        return;
+
+    QFile file(fileName);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox(
+            QMessageBox::Icon::Critical,
+            obs_module_text("Notice.Title"),
+            obs_module_text("Error.ImportConfig"),
+            QMessageBox::StandardButton::Ok,
+            this
+        ).exec();
+        return;
+    }
+    auto bytes = file.readAll();
+
+    auto imported = DeserializeMultiOutputConfig(std::string(bytes.constData(), static_cast<size_t>(bytes.size())));
+    if (!imported.has_value()) {
+        QMessageBox(
+            QMessageBox::Icon::Critical,
+            obs_module_text("Notice.Title"),
+            obs_module_text("Error.ImportConfig"),
+            QMessageBox::StandardButton::Ok,
+            this
+        ).exec();
+        return;
+    }
+
+    for (auto x : GetAllPushWidgets()) {
+        if (x->IsRunning()) {
+            QMessageBox(
+                QMessageBox::Icon::Warning,
+                obs_module_text("Notice.Title"),
+                obs_module_text("Error.ImportActive"),
+                QMessageBox::StandardButton::Ok,
+                this
+            ).exec();
+            return;
+        }
+    }
+
+    auto confirm = QMessageBox(
+        QMessageBox::Icon::Question,
+        obs_module_text("Question.Title"),
+        obs_module_text("Question.Import"),
+        QMessageBox::Yes | QMessageBox::No,
+        this
+    ).exec();
+    if (confirm != QMessageBox::Yes)
+        return;
+
+    GlobalMultiOutputConfig() = *imported;
+    SaveConfig();
+    LoadConfig();
+}
+
+void MultiOutputWidget::OnOutputMoved(
+    const QModelIndex &parent,
+    int start,
+    int end,
+    const QModelIndex &destination,
+    int row
+)
+{
+    // QListWidget uses a single root parent for internal move operations.
+    if (parent != destination) {
+        return;
+    }
+
+    const int count = outputsContainer_->count();
+    if (count <= 0 || start < 0 || end < start || row < 0 || row > count) {
+        return;
+    }
+
+    auto &targets = GlobalMultiOutputConfig().targets;
+    std::unordered_map<std::string, OutputTargetConfigPtr> targetById;
+    targetById.reserve(targets.size());
+    for (auto &target : targets) {
+        if (target) {
+            targetById.emplace(target->id, target);
+        }
+    }
+
+    std::remove_reference_t<decltype(targets)> reordered;
+    for (int i = 0; i < count; ++i) {
+        auto item = outputsContainer_->item(i);
+        if (!item) {
+            continue;
+        }
+
+        auto id = item->data(Qt::UserRole).toString().toStdString();
+        auto it = targetById.find(id);
+        if (it == targetById.end()) {
+            continue;
+        }
+
+        reordered.emplace_back(it->second);
+        targetById.erase(it);
+    }
+
+    // Keep unmatched items in their previous order to avoid accidental loss.
+    if (!targetById.empty()) {
+        for (auto &target : targets) {
+            if (!target) {
+                continue;
+            }
+            auto it = targetById.find(target->id);
+            if (it == targetById.end()) {
+                continue;
+            }
+            reordered.emplace_back(it->second);
+            targetById.erase(it);
+        }
+    }
+
+    targets.swap(reordered);
+
+    SaveConfig();
+    outputsContainer_->clearSelection();
+}
+
 void MultiOutputWidget::LoadConfig()
 {
-    // Clear existing widgets safely
-    QLayoutItem* item;
-    while ((item = itemLayout_->takeAt(0)) != nullptr) {
-        if (item->widget()) {
-            item->widget()->deleteLater();
-        }
-        delete item;
-    }
-    
-    GlobalMultiOutputConfig() = {};
+    outputsContainer_->clear();
 
-    if (LoadMultiOutputConfig()) {
-        for(auto x: GlobalMultiOutputConfig().targets)
-        {
-            auto pushwidget = createPushWidget(x->id, container_);
-            itemLayout_->addWidget(pushwidget);
+    GlobalMultiOutputConfig() = {};
+    if (!LoadMultiOutputConfig()) {
+        return;
+    }
+
+    for(auto x: GlobalMultiOutputConfig().targets)
+    {
+        AddPushWidget(x->id);
+    }
+}
+
+
+
+void MultiOutputWidget::DeletePushWidget(const std::string& targetId)
+{
+    // Delete from model
+    auto outputTargets = &(GlobalMultiOutputConfig().targets);
+    auto currentTarget = std::find_if(outputTargets->begin(), outputTargets->end(), [&targetId](auto& x) { return x->id == targetId; });
+    if (currentTarget == outputTargets->end()) {
+        return;
+    }
+    outputTargets->erase(currentTarget);
+
+    // Delete from List View
+    const QString id = QString::fromStdString(targetId);
+    for(auto listItem: outputsContainer_->findItems("", Qt::MatchContains)) {
+        if (listItem->data(Qt::UserRole).toString() != id) {
+            continue;
+        }
+        int row = outputsContainer_->row(listItem);
+        auto removedItem = outputsContainer_->takeItem(row);
+        auto pushWidget = outputsContainer_->itemWidget(removedItem);
+        delete removedItem;
+        if (pushWidget) {
+            pushWidget->deleteLater();
         }
     }
 }
 
+PushWidget* MultiOutputWidget::AddPushWidget(const std::string& targetId)
+{
+    auto pushWidget = createPushWidget(targetId, outputsContainer_->viewport());
+
+    QListWidgetItem* listItem = new QListWidgetItem();
+    listItem->setData(Qt::UserRole, QString::fromStdString(targetId));
+    listItem->setSizeHint(pushWidget->sizeHint());
+    outputsContainer_->addItem(listItem);
+    outputsContainer_->setItemWidget(listItem, pushWidget);
+
+    QObject::connect(pushWidget->GetDeleteButton(), &QPushButton::clicked, [this, targetId]() {
+        auto msgbox = new QMessageBox(
+            QMessageBox::Icon::Question,
+            obs_module_text("Question.Title"),
+            obs_module_text("Question.Delete"),
+            QMessageBox::Yes | QMessageBox::No,
+            this
+        );
+        if (msgbox->exec() != QMessageBox::Yes) {
+            return;
+        }
+        DeletePushWidget(targetId);
+        SaveConfig();
+    });
+
+    return pushWidget;
+}
+
+// ---------------------------------------------------------------------------
+// obs-websocket support. Called by MultiRTMPWebsocketVendor on the UI thread.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Maps a user-supplied protocol name onto the plugin's protocol ids (see
+// protocols.cpp). Returns an empty string for unknown protocols.
+std::string NormalizeProtocol(const QString& protocol)
+{
+    const QString p = protocol.trimmed().toLower();
+    std::string id;
+    if (p.isEmpty() || p == "rtmp" || p == "rtmps")
+        id = "RTMP";
+    else if (p == "srt" || p == "rist" || p == "srt/rist")
+        id = "SRT_RIST";
+    else
+        id = tostdu8(p.toUpper());
+    return GetProtocolInfos()->GetInfo(id.c_str()) ? id : std::string();
+}
+
+// Name of the service parameter holding the stream key for a protocol.
+const char* StreamKeyParamName(const std::string& protocol)
+{
+    return protocol == "WHIP" ? SERVICE_PARAM_BEARER_TOKEN : SERVICE_PARAM_STREAM_KEY;
+}
+
+} // namespace
+
+PushWidget* MultiOutputWidget::CreateTarget(std::shared_ptr<OutputTargetConfig> target)
+{
+    auto& global = GlobalMultiOutputConfig();
+    target->id = GenerateId(global);
+    global.targets.emplace_back(target);
+    return AddPushWidget(target->id);
+}
+
+bool MultiOutputWidget::MutateTarget(const QString& targetId, std::function<void(OutputTargetConfig&)> mutate)
+{
+    auto widget = FindPushWidgetById(targetId);
+    auto config = widget ? widget->GetConfig() : nullptr;
+    if (!config) {
+        blog(LOG_WARNING, TAG "Target not found: %s", targetId.toUtf8().constData());
+        return false;
+    }
+
+    mutate(*config);
+    widget->UpdateUI();
+    SaveConfig();
+    return true;
+}
+
 bool MultiOutputWidget::AddNewTarget(const QString& name, const QString& protocol)
 {
-    // ✅ ADD INPUT VALIDATION
     if (name.isEmpty()) {
         blog(LOG_WARNING, TAG "AddNewTarget failed: Empty name provided");
         return false;
     }
-    
-    // Validate protocol
-    QString validProtocol = protocol.toLower();
-    if (validProtocol.isEmpty()) {
-        validProtocol = "rtmp"; // Default to RTMP
-    }
-    
-    // Check if protocol is supported
-    QSet<QString> supportedProtocols = {"rtmp", "srt"}; // Add more as needed
-    if (!supportedProtocols.contains(validProtocol)) {
-        blog(LOG_WARNING, TAG "AddNewTarget failed: Unsupported protocol '%s'", validProtocol.toUtf8().constData());
+
+    const auto normalized = NormalizeProtocol(protocol);
+    if (normalized.empty()) {
+        blog(LOG_WARNING, TAG "AddNewTarget failed: Unsupported protocol '%s'", protocol.toUtf8().constData());
         return false;
     }
-    
-    auto& global = GlobalMultiOutputConfig();
-    auto newid = GenerateId(global);
+
     auto target = std::make_shared<OutputTargetConfig>();
-    target->id = newid;
-    target->name = name.toStdString();
-    target->protocol = validProtocol.toStdString();
-    global.targets.emplace_back(target);
-    
+    target->name = tostdu8(name);
+    target->protocol = normalized;
+    CreateTarget(target);
     SaveConfig();
-    RefreshUI();
-    
-    blog(LOG_INFO, TAG "Added new target: %s (Protocol: %s)", name.toUtf8().constData(), validProtocol.toUtf8().constData());
+
+    blog(LOG_INFO, TAG "Added new target: %s (Protocol: %s)", target->name.c_str(), normalized.c_str());
     return true;
 }
 
 bool MultiOutputWidget::CloneTarget(const QString& sourceId, const QString& newName, const QString& newStreamKey)
 {
-    for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == sourceId) {
-            auto& global = GlobalMultiOutputConfig();
-            auto newid = GenerateId(global);
-            
-            auto sourceConfig = widget->GetConfig();
-            if (!sourceConfig) {
-                return false;
-            }
-            
-            auto target = std::make_shared<OutputTargetConfig>(*sourceConfig);
-            target->id = newid;
-            target->name = newName.toStdString();
-            
-            if (!newStreamKey.isEmpty()) {
-                try {
-                    auto serviceParams = nlohmann::json::parse(target->serviceParam.dump());
-                    
-                    if (target->protocol == "RTMP" || target->protocol == "rtmp") {
-                        if (serviceParams.contains("key")) {
-                            serviceParams["key"] = newStreamKey.toStdString();
-                        }
-                    } else if (target->protocol == "SRT" || target->protocol == "srt") {
-                        if (serviceParams.contains("streamid")) {
-                            serviceParams["streamid"] = newStreamKey.toStdString();
-                        }
-                    }
-                    
-                    target->serviceParam = serviceParams;
-                    
-                } catch (const std::exception& e) {
-                    blog(LOG_WARNING, TAG "Failed to parse service parameters for stream key update: %s", e.what());
-                }
-            }
-            
-            global.targets.emplace_back(target);
-            SaveConfig();
-            
-            // ✅ FIX: Direct call to RefreshUI (assumes we're in UI thread)
-            RefreshUI();
-            
-            return true;
-        }
-    }
-    return false;
+    auto source = FindPushWidgetById(sourceId);
+    auto sourceConfig = source ? source->GetConfig() : nullptr;
+    if (!sourceConfig)
+        return false;
+
+    auto target = std::make_shared<OutputTargetConfig>(*sourceConfig);
+    target->name = tostdu8(newName);
+    if (!newStreamKey.isEmpty())
+        target->serviceParam[StreamKeyParamName(target->protocol)] = tostdu8(newStreamKey);
+
+    CreateTarget(target);
+    SaveConfig();
+    return true;
 }
 
 bool MultiOutputWidget::UpdateTargetName(const QString& targetId, const QString& newName)
 {
-    // ✅ ADD INPUT VALIDATION
     if (newName.isEmpty()) {
         blog(LOG_WARNING, TAG "UpdateTargetName failed: Empty name provided for target %s", targetId.toUtf8().constData());
         return false;
     }
-    
-    for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == targetId) {
-            widget->GetConfig()->name = newName.toStdString();
-            widget->UpdateUI();
-            SaveConfig();
-            RefreshUI();
-            
-            blog(LOG_INFO, TAG "Updated target name: %s -> %s", 
-                 widget->GetConfig()->name.c_str(), newName.toUtf8().constData());
-            return true;
-        }
-    }
-    
-    blog(LOG_WARNING, TAG "UpdateTargetName failed: Target not found %s", targetId.toUtf8().constData());
-    return false;
+
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) {
+        config.name = tostdu8(newName);
+    });
 }
 
 bool MultiOutputWidget::UpdateTargetStreamKey(const QString& targetId, const QString& streamKey)
@@ -344,50 +636,10 @@ bool MultiOutputWidget::UpdateTargetStreamKey(const QString& targetId, const QSt
         blog(LOG_WARNING, TAG "UpdateStreamKey failed: Empty stream key provided for target %s", targetId.toUtf8().constData());
         return false;
     }
-    
-    for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == targetId) {
-            auto config = widget->GetConfig();
-            if (!config) {
-                blog(LOG_WARNING, TAG "UpdateStreamKey failed: Could not get config for target %s", targetId.toUtf8().constData());
-                return false;
-            }
-            
-            try {
-                // Parse the current service parameters
-                auto serviceParams = nlohmann::json::parse(config->serviceParam.dump());
-                
-                // Use protocol-specific parameter names
-                std::string param_name = "key"; // Default for RTMP and most protocols
-                
-                if (config->protocol == "srt" || config->protocol == "SRT") {
-                    param_name = "streamid"; // SRT uses streamid
-                }
-                // WHIP uses "key" same as RTMP, so no special handling needed
-                
-                serviceParams[param_name] = streamKey.toStdString();
-                config->serviceParam = serviceParams;
-                
-                blog(LOG_INFO, TAG "Updated stream key for target %s (%s): %s = %s", 
-                     targetId.toUtf8().constData(), 
-                     config->protocol.c_str(),
-                     param_name.c_str(),
-                     streamKey.toUtf8().constData());
-                
-                SaveConfig();
-                RefreshUI();
-                return true;
-                
-            } catch (const std::exception& e) {
-                blog(LOG_WARNING, TAG "Failed to update stream key for target %s: %s", 
-                     targetId.toUtf8().constData(), e.what());
-                return false;
-            }
-        }
-    }
-    
-    blog(LOG_WARNING, TAG "UpdateStreamKey failed: Target not found %s", targetId.toUtf8().constData());
-    return false;
+
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) {
+        config.serviceParam[StreamKeyParamName(config.protocol)] = tostdu8(streamKey);
+    });
 }
 
 bool MultiOutputWidget::UpdateTargetServiceParam(const QString& targetId, const QString& key, const QString& value)
@@ -396,121 +648,60 @@ bool MultiOutputWidget::UpdateTargetServiceParam(const QString& targetId, const 
         blog(LOG_WARNING, TAG "UpdateServiceParam failed: Empty key or value for target %s", targetId.toUtf8().constData());
         return false;
     }
-    
-    for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == targetId) {
-            auto config = widget->GetConfig();
-            if (!config) {
-                blog(LOG_WARNING, TAG "UpdateServiceParam failed: Could not get config for target %s", targetId.toUtf8().constData());
-                return false;
-            }
-            
-            try {
-                auto serviceParams = nlohmann::json::parse(config->serviceParam.dump());
-                
-                std::string keyStr = key.toStdString();
-                std::string valueStr = value.toStdString();
-                
-                // Special handling for boolean parameters
-                if (valueStr == "true" || valueStr == "false") {
-                    serviceParams[keyStr] = (valueStr == "true");
-                } else {
-                    serviceParams[keyStr] = valueStr;
-                }
-                
-                config->serviceParam = serviceParams;
-                
-                blog(LOG_INFO, TAG "Updated service parameter for target %s: %s = %s", 
-                     targetId.toUtf8().constData(), key.toUtf8().constData(), value.toUtf8().constData());
-                
-                SaveConfig();
-                RefreshUI();
-                return true;
-                
-            } catch (const std::exception& e) {
-                blog(LOG_WARNING, TAG "Failed to update service parameter for target %s: %s", 
-                     targetId.toUtf8().constData(), e.what());
-                return false;
-            }
-        }
-    }
-    
-    blog(LOG_WARNING, TAG "UpdateServiceParam failed: Target not found %s", targetId.toUtf8().constData());
-    return false;
+
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) {
+        const auto keyStr = tostdu8(key);
+        const auto valueStr = tostdu8(value);
+        if (valueStr == "true" || valueStr == "false")
+            config.serviceParam[keyStr] = (valueStr == "true");
+        else
+            config.serviceParam[keyStr] = valueStr;
+    });
 }
 
 bool MultiOutputWidget::DeleteTarget(const QString& targetId)
 {
-    auto& global = GlobalMultiOutputConfig();
-    auto it = std::find_if(global.targets.begin(), global.targets.end(), 
-        [&](auto& target) { return target->id == targetId.toStdString(); });
-    
-    if (it != global.targets.end()) {
-        global.targets.erase(it);
-        SaveConfig();
-        RefreshUI();  // ✅ FIX: Direct call to RefreshUI
-        return true;
-    }
-    
-    return false;
+    if (!FindPushWidgetById(targetId))
+        return false;
+
+    // Destroying the widget releases (and force-stops) its output.
+    DeletePushWidget(tostdu8(targetId));
+    SaveConfig();
+    return true;
 }
 
 bool MultiOutputWidget::UpdateSyncStart(const QString& targetId, bool syncStart)
 {
-    for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == targetId) {
-            auto config = widget->GetConfig();
-            if (!config) {
-                blog(LOG_WARNING, TAG "UpdateSyncStart failed: Could not get config for target %s", targetId.toUtf8().constData());
-                return false;
-            }
-            
-            config->syncStart = syncStart;
-            
-            blog(LOG_INFO, TAG "Updated sync start for target %s: %s", 
-                 targetId.toUtf8().constData(), syncStart ? "true" : "false");
-            
-            SaveConfig();
-            RefreshUI();
-            return true;
-        }
-    }
-    
-    blog(LOG_WARNING, TAG "UpdateSyncStart failed: Target not found %s", targetId.toUtf8().constData());
-    return false;
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) { config.syncStart = syncStart; });
 }
 
 bool MultiOutputWidget::UpdateSyncStop(const QString& targetId, bool syncStop)
 {
-    for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == targetId) {
-            auto config = widget->GetConfig();
-            if (!config) {
-                blog(LOG_WARNING, TAG "UpdateSyncStop failed: Could not get config for target %s", targetId.toUtf8().constData());
-                return false;
-            }
-            
-            config->syncStop = syncStop;
-            
-            blog(LOG_INFO, TAG "Updated sync stop for target %s: %s", 
-                 targetId.toUtf8().constData(), syncStop ? "true" : "false");
-            
-            SaveConfig();
-            RefreshUI();
-            return true;
-        }
-    }
-    
-    blog(LOG_WARNING, TAG "UpdateSyncStop failed: Target not found %s", targetId.toUtf8().constData());
-    return false;
+    return MutateTarget(targetId, [&](OutputTargetConfig& config) { config.syncStop = syncStop; });
 }
 
 PushWidget* MultiOutputWidget::FindPushWidgetById(const QString& targetId)
 {
+    for (int row = 0; row < outputsContainer_->count(); ++row) {
+        auto item = outputsContainer_->item(row);
+        if (!item || item->data(Qt::UserRole).toString() != targetId)
+            continue;
+        return dynamic_cast<PushWidget*>(outputsContainer_->itemWidget(item));
+    }
+    return nullptr;
+}
+
+PushWidget* MultiOutputWidget::FindByIdOrName(const QString& id, const QString& name)
+{
+    if (!id.isEmpty())
+        return FindPushWidgetById(id);
+    if (name.isEmpty())
+        return nullptr;
+
     for (auto* widget : GetAllPushWidgets()) {
-        if (widget->GetTargetId() == targetId) {
+        auto config = widget->GetConfig();
+        if (config && QString::fromStdString(config->name) == name)
             return widget;
-        }
     }
     return nullptr;
 }

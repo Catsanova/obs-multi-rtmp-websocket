@@ -1,21 +1,14 @@
-#include "pch.h"
+﻿#include "pch.h"
 
+#include <functional>
 #include <list>
-#include <regex>
-#include <filesystem>
 
 #include "push-widget.h"
 #include "plugin-support.h"
 
 #include "output-config.h"
-
-//added for websocket
-#include "ws_vendor.hpp"
 #include "multi-output-widget.h"
-
-#ifdef _WIN32
-#include <Windows.h>
-#endif
+#include "ws_vendor.hpp"
 
 #define ConfigSection "obs-multi-rtmp"
 
@@ -39,6 +32,7 @@ GlobalService& GetGlobalService() {
     return s_service;
 }
 
+
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("obs-multi-rtmp", "en-US")
 OBS_MODULE_AUTHOR("雷鳴 (@sorayukinoyume)")
@@ -52,23 +46,45 @@ bool obs_module_load()
         s_service.uiThread_ = QThread::currentThread();
     });
 
-    // ✅ FIXED: Don't initialize vendor here - wait until obs-websocket is loaded
-    // Just create the instance but don't initialize yet
+    // Only create the instance here; vendor registration has to wait until
+    // obs-websocket is loaded (see OBS_FRONTEND_EVENT_FINISHED_LOADING below).
     MultiRTMPWebsocketVendor::Instance();
 
-    blog(LOG_INFO, TAG "Websocket vendor instance created (will register when obs-websocket loads)");
-
     auto dock = new MultiOutputWidget();
-    dock->setObjectName("obs-multi-rtmp-dock");
-    if (!obs_frontend_add_dock_by_id("obs-multi-rtmp-dock", obs_module_text("Title"), dock))
+    dock->setObjectName(MULTI_RTMP_DOCK_ID);
+    if (!obs_frontend_add_dock_by_id(MULTI_RTMP_DOCK_ID, obs_module_text("Title"), dock))
     {
         delete dock;
         return false;
     }
 
+    obs_hotkey_register_frontend(
+        "obs-multi-rtmp.start_all",
+        obs_module_text("Hotkey.StartAllTargets"),
+        [](void* private_data, obs_hotkey_id, obs_hotkey_t*, bool pressed) {
+            auto dock = static_cast<MultiOutputWidget*>(private_data);
+            if (!pressed || !dock)
+                return;
+            for (auto x : dock->GetAllPushWidgets())
+                x->StartStreaming();
+        },
+        dock
+    );
+    obs_hotkey_register_frontend(
+        "obs-multi-rtmp.stop_all",
+        obs_module_text("Hotkey.StopAllTargets"),
+        [](void* private_data, obs_hotkey_id, obs_hotkey_t*, bool pressed) {
+            auto dock = static_cast<MultiOutputWidget*>(private_data);
+            if (!pressed || !dock)
+                return;
+            for (auto x : dock->GetAllPushWidgets())
+                x->StopStreaming();
+        },
+        dock
+    );
+
     blog(LOG_INFO, TAG "version: %s by SoraYuki https://github.com/sorayuki/obs-multi-rtmp/", PLUGIN_VERSION);
 
-    // ✅ ADD THIS: Listen for module load events to detect when obs-websocket loads
     obs_frontend_add_event_callback(
         [](enum obs_frontend_event event, void *private_data) {
             auto dock = static_cast<MultiOutputWidget*>(private_data);
@@ -84,10 +100,9 @@ bool obs_module_load()
             {
                 dock->LoadConfig();
             }
-            // ✅ ADD THIS: Check if obs-websocket is now loaded
             else if (event == obs_frontend_event::OBS_FRONTEND_EVENT_FINISHED_LOADING)
             {
-                // Try to initialize vendor after all modules are loaded
+                // obs-websocket is available now; register the vendor requests.
                 MultiRTMPWebsocketVendor::Instance()->Initialize();
             }
         }, dock
@@ -98,9 +113,7 @@ bool obs_module_load()
 
 void obs_module_unload(void)
 {
-#ifdef ENABLE_WEBSOCKET
     MultiRTMPWebsocketVendor::Instance()->Shutdown();
-#endif
 }
 
 const char *obs_module_description(void)

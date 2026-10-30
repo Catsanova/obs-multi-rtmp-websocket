@@ -1,8 +1,12 @@
 #include "pch.h"
 #include "helpers.h"
 #include <regex>
+#include <atomic>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <tuple>
+#include <unordered_map>
 #include "push-widget.h"
 #include "edit-widget.h"
 #include "output-config.h"
@@ -10,12 +14,138 @@
 
 #include "obs.hpp"
 
-// PushWidget constructor implementation for websocket
-PushWidget::PushWidget(const std::string& targetid, QWidget* parent)
+PushWidget::PushWidget(QWidget* parent)
     : QWidget(parent)
 {
-    UNUSED_PARAMETER(targetid);
-    // Base constructor - can be empty
+}
+
+class SharedSceneView final
+{
+    OBSEncoder encoder_;
+    obs_view_t* view_ = nullptr;
+    video_t* video_ = nullptr;
+    std::mutex source_mutex_;
+
+public:
+    explicit SharedSceneView(obs_encoder_t* encoder)
+        : encoder_(encoder)
+    {
+    }
+
+    ~SharedSceneView()
+    {
+        if (!view_)
+            return;
+
+        obs_view_remove(view_);
+        OBSSourceAutoRelease source = obs_view_get_source(view_, 0);
+        if (source)
+            obs_source_dec_active(source);
+        obs_view_set_source(view_, 0, nullptr);
+        obs_view_destroy(view_);
+    }
+
+    bool Initialize(obs_source_t* source)
+    {
+        if (!source)
+            return false;
+
+        view_ = obs_view_create();
+        if (!view_)
+            return false;
+
+        obs_view_set_source(view_, 0, source);
+        obs_source_inc_active(source);
+        video_ = obs_view_add(view_);
+        return video_ != nullptr;
+    }
+
+    bool SetSource(obs_source_t* source)
+    {
+        if (!view_ || !source)
+            return false;
+
+        std::lock_guard<std::mutex> lock(source_mutex_);
+        OBSSourceAutoRelease current = obs_view_get_source(view_, 0);
+        if (current == source)
+            return true;
+
+        obs_view_set_source(view_, 0, source);
+        if (current)
+            obs_source_dec_active(current);
+        obs_source_inc_active(source);
+        return true;
+    }
+
+    video_t* Video() const
+    {
+        return video_;
+    }
+};
+
+class SharedSceneViewManager final
+{
+    std::mutex mutex_;
+    std::unordered_map<obs_encoder_t*, std::weak_ptr<SharedSceneView>> entries_;
+
+public:
+    std::shared_ptr<SharedSceneView> Acquire(obs_encoder_t* encoder, obs_source_t* source)
+    {
+        if (!encoder || !source)
+            return {};
+
+        std::unique_lock<std::mutex> lock(mutex_);
+        for (auto it = entries_.begin(); it != entries_.end();) {
+            if (it->second.expired())
+                it = entries_.erase(it);
+            else
+                ++it;
+        }
+
+        auto it = entries_.find(encoder);
+        if (it != entries_.end()) {
+            auto entry = it->second.lock();
+            if (entry) {
+                lock.unlock();
+                if (!entry->SetSource(source)) {
+                    blog(LOG_ERROR, TAG "Could not update the shared output scene.");
+                    return {};
+                }
+                return entry;
+            }
+            entries_.erase(it);
+        }
+
+        if (obs_encoder_active(encoder)) {
+            blog(LOG_ERROR, TAG "Shared video encoder is active without a registered scene view.");
+            return {};
+        }
+
+        auto entry = std::make_shared<SharedSceneView>(encoder);
+        if (!entry->Initialize(source)) {
+            lock.unlock();
+            entry.reset();
+            blog(LOG_ERROR, TAG "Could not create the shared output scene view.");
+            return {};
+        }
+
+        obs_encoder_set_video(encoder, entry->Video());
+        if (obs_encoder_parent_video(encoder) != entry->Video()) {
+            lock.unlock();
+            entry.reset();
+            blog(LOG_ERROR, TAG "Could not bind the shared scene view to the video encoder.");
+            return {};
+        }
+
+        entries_[encoder] = entry;
+        return entry;
+    }
+};
+
+static SharedSceneViewManager& GetSharedSceneViewManager()
+{
+    static SharedSceneViewManager manager;
+    return manager;
 }
 
 class IOBSOutputEventHanlder
@@ -110,6 +240,8 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
     QPushButton* btn_ = 0;
     QLabel* name_ = 0;
     QLabel* msg_ = 0;
+    QLabel* status_dot_ = 0;
+    QCheckBox* enabled_cb_ = 0;
 
     using clock = std::chrono::steady_clock;
     clock::time_point begin_time_;
@@ -122,14 +254,27 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
     QPushButton* remove_btn_ = 0;
 
     obs_output_t* output_ = 0;
+    // Owned reference to the service handed to output_ (the output itself only keeps a weak back-pointer).
+    obs_service_t* service_ = 0;
     bool using_main_video_encoder_ = false;
     bool using_main_audio_encoder_ = false;
-    obs_view_t* scene_view_ = 0;
+    std::shared_ptr<SharedSceneView> scene_view_;
     bool isUseDelay_ = false;
+    std::atomic_bool isStarting_ = false;
 
-    // State tracking for websocket access
-    bool isRunning_ = false;
-    bool isStopping_ = false;
+    bool isConnecting_ = false;
+    bool isReconnecting_ = false;
+    int lastErrorCode_ = 0;
+
+    // Registered under the stable target id (not the display name) so key
+    // bindings survive renames. Their description label is set once at
+    // registration time and won't update if the target is renamed later.
+    obs_hotkey_id startHotkeyId_ = OBS_INVALID_HOTKEY_ID;
+    obs_hotkey_id stopHotkeyId_ = OBS_INVALID_HOTKEY_ID;
+
+    QPushButton* GetDeleteButton() {
+        return remove_btn_;
+    }
 
     bool PrepareOutputService()
     {
@@ -137,10 +282,19 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             blog(LOG_ERROR, TAG "Prepare output service before output object is created.");
             return false;
         }
-        
-        ReleaseOutputService();
-        
-        auto conf = obs_data_create_from_json(config_->serviceParam.dump().c_str());
+
+        // The output is rebuilt per start, so no service should be left over.
+        // Freeing one here would be unsafe: libobs ignores
+        // obs_output_set_service(output, nullptr), so the output would keep a
+        // dangling pointer into the freed service.
+        if (service_) {
+            blog(LOG_ERROR, TAG "Stale service object before creating a new one.");
+            return false;
+        }
+
+        // Auto-release: obs_service_create keeps its own reference and every
+        // early return below would otherwise leak this one.
+        OBSDataAutoRelease conf = obs_data_create_from_json(config_->serviceParam.dump().c_str());
 
         auto protocolInfo = GetProtocolInfos()->GetInfo(config_->protocol.c_str());
         assert(protocolInfo);
@@ -153,33 +307,28 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
         if (!conf)
             return false;
         
-        auto service = obs_service_create(service_id, "multi-output-service", conf, nullptr);
-        obs_data_release(conf);
+        // We own this reference. The output only keeps a weak back-pointer,
+        // which obs_output_destroy() clears again.
+        obs_service_t* service = obs_service_create(service_id, "multi-output-service", conf, nullptr);
         if (!service)
             return false;
         obs_output_set_service(output_, service);
+        service_ = service;
 
         return true;
     }
 
 
+    // Only valid once output_ is gone: destroying the output is what clears the
+    // service's back-pointer, so freeing it earlier leaves a dangling pointer.
     bool ReleaseOutputService()
     {
-        if (!output_)
+        if (!service_)
             return true;
-        else if (output_ && obs_output_active(output_) == false)
-        {
-            auto service = obs_output_get_service(output_);
-            if (service)
-            {
-                obs_output_set_service(output_, nullptr);
-                obs_service_release(service);
-            }
-            return true;
-        }
-        else {
-            return false;
-        }
+
+        obs_service_release(service_);
+        service_ = nullptr;
+        return true;
     }
 
 
@@ -206,13 +355,9 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
                     blog(LOG_ERROR, TAG "Output scene is not found.");
                     return false;
                 }
-                ReleaseOutputSceneView();
-
-                scene_view_ = obs_view_create();
-                obs_view_set_source(scene_view_, 0, scene);
-                obs_source_inc_active(scene);
-                auto scene_video = obs_view_add(scene_view_);
-                obs_encoder_set_video(venc, scene_video);
+                scene_view_ = GetSharedSceneViewManager().Acquire(venc, scene);
+                if (!scene_view_)
+                    return false;
             }
         }
 
@@ -241,18 +386,7 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
 
 
     bool ReleaseOutputSceneView() {
-        if (!scene_view_)
-            return true;
-
-        obs_view_remove(scene_view_);
-        OBSSourceAutoRelease source = obs_view_get_source(scene_view_, 0);
-        if (source) {
-            obs_source_dec_active(source);
-        }
-        obs_view_set_source(scene_view_, 0, nullptr);
-        obs_view_destroy(scene_view_);
-        scene_view_ = nullptr;
-
+        scene_view_.reset();
         return true;
     }
 
@@ -369,8 +503,6 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             blog(LOG_ERROR, TAG "Prepare output encoder before output object is created.");
             return false;
         }
-        
-        ReleaseOutputEncoder();
 
         auto& global = GlobalMultiOutputConfig();
 
@@ -403,10 +535,6 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
         }
 
         if (!aenc || !venc) {
-            // If we don't have a valid encoder, we're likely using a special encoder type that
-            // needs to be started by the user (i.e. start streaming or start recording)
-            ReleaseOutputEncoder();
-
             auto msgbox = new QMessageBox(QMessageBox::Icon::Critical, 
                 obs_module_text("Notice.Title"), 
                 obs_module_text("Notice.GetEncoder"),
@@ -417,79 +545,39 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             return false;
         }
 
-        obs_output_set_audio_encoder(output_, obs_encoder_get_ref(aenc), 0);
+        // set_*_encoder() addrefs internally
+        obs_output_set_audio_encoder(output_, aenc, 0);
         for (auto& track : additionalTracks) {
-            auto trackIdx = std::get<0>(track);
-            auto enc = std::get<1>(track);
-            obs_output_set_audio_encoder(output_, obs_encoder_get_ref(enc), trackIdx);
+            obs_output_set_audio_encoder(output_, std::get<1>(track), std::get<0>(track));
         }
-        obs_output_set_video_encoder(output_, obs_encoder_get_ref(venc));
+        obs_output_set_video_encoder(output_, venc);
 
         return true;
     }
 
-
-    bool ReleaseOutputEncoder()
-    {
-        if (!output_)
-            return true;
-        else if (obs_output_active(output_) == false)
-        {
-            auto venc = obs_output_get_video_encoder(output_);
-            if (venc)
-            {
-                obs_output_set_video_encoder(output_, nullptr);
-                obs_encoder_release(venc);
-            }
-            
-            auto aenc = obs_output_get_audio_encoder(output_, 0);
-            if (aenc)
-            {
-                obs_output_set_audio_encoder(output_, nullptr, 0);
-                obs_encoder_release(aenc);
-            }
-
-            return true;
-        }
-        else {
-            blog(LOG_ERROR, TAG "Release output while it is active.");
-            return false;
-        }
-    }
 
 
     bool ReleaseOutput()
     {
         if (output_) {
             DisconnectSignals(output_);
-        }
 
-        if (output_ && obs_output_active(output_)) {
-            obs_output_force_stop(output_);
-        }
+            // failback: check if the output is still active and force stop it if necessary
+            if (obs_output_active(output_))
+                obs_output_force_stop(output_);
 
-        if (output_ && obs_output_active(output_) == false)
-        {
-            bool ret = ReleaseOutputService();
-            ret = ReleaseOutputEncoder() && ret;
-
+            // obs_output_destroy() clears the service's back-pointer
             obs_output_release(output_);
             output_ = nullptr;
-
-            ret = ReleaseOutputSceneView() && ret;
-
-            return ret;
         }
-        else if (output_) {
-            obs_output_release(output_);
-            output_ = nullptr;
 
-            return true;
-        }
-        else if (output_ == nullptr)
-            return true;
-        else
-            return false;
+        // Safe here: the output that referenced the service is gone by now.
+        ReleaseOutputService();
+
+        // The output is gone; other targets may still hold the shared view.
+        ReleaseOutputSceneView();
+
+        return true;
     }
 
 
@@ -551,9 +639,42 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
         last_info_time_ = now;
     }
 
+    void UpdateStatusDot(bool stopped = false) {
+        if (!status_dot_)
+            return;
+
+        const char* color = "#888888"; // stopped / idle
+        if (isReconnecting_ || isConnecting_)
+            color = "#e6b800"; // connecting / reconnecting
+        else if (!stopped && IsRunning())
+            color = "#2ecc71"; // live
+        else if (lastErrorCode_ != 0)
+            color = "#e74c3c"; // last attempt failed
+
+        status_dot_->setStyleSheet(QString("color: %1;").arg(color));
+    }
+
+    OBS_MULTI_RTMP_DEFINE_WEAK_THIS()
+
+    template <typename Task>
+    void RunInUIThread(Task&& task)
+    {
+        auto weakThis = GetWeakThis();
+        if (!GetGlobalService().RunInUIThread([weakThis, task = std::forward<Task>(task)]() mutable {
+            auto self = weakThis.Get();
+            if (!self) {
+                blog(LOG_WARNING, TAG "Skipping UI callback for a destroyed push widget.");
+                return;
+            }
+            task();
+        })) {
+            blog(LOG_WARNING, TAG "Could not schedule push widget callback on the UI thread.");
+        }
+    }
+
 public:
     PushWidgetImpl(const std::string& targetid, QWidget* parent = 0)
-        : PushWidget(targetid, parent)  // Explicitly call PushWidget constructor for websocket
+        : PushWidget(parent)
         , targetid_(targetid)
     {
         QObject::setObjectName("push-widget");
@@ -570,88 +691,100 @@ public:
         });
 
         auto layout = new QGridLayout(this);
-        layout->addWidget(name_ = new QLabel(obs_module_text("NewStreaming"), this), 0, 0, 1, 3);
-        layout->addWidget(btn_ = new QPushButton(obs_module_text("Btn.Start"), this), 1, 0);
+        layout->addWidget(status_dot_ = new QLabel(u8"●", this), 0, 0);
+        layout->addWidget(name_ = new QLabel(obs_module_text("NewStreaming"), this), 0, 1, 1, 3);
+
+        layout->addWidget(enabled_cb_ = new QCheckBox(this), 1, 0);
+        enabled_cb_->setToolTip(obs_module_text("Target.Enabled"));
+        QObject::connect(enabled_cb_, &QCheckBox::clicked, [this](bool checked) {
+            SetEnabled(checked);
+        });
+
+        layout->addWidget(btn_ = new QPushButton(obs_module_text("Btn.Start"), this), 1, 1);
         QObject::connect(btn_, &QPushButton::clicked, [this]() {
             StartStop();
         });
 
-        layout->addWidget(edit_btn_ = new QPushButton(obs_module_text("Btn.Edit"), this), 1, 1);
+        layout->addWidget(edit_btn_ = new QPushButton(obs_module_text("Btn.Edit"), this), 1, 2);
         QObject::connect(edit_btn_, &QPushButton::clicked, [this]() {
             ShowEditDlg();
         });
 
-        layout->addWidget(remove_btn_ = new QPushButton(obs_module_text("Btn.Delete"), this), 1, 2);
-        QObject::connect(remove_btn_, &QPushButton::clicked, [this]() {
-            auto msgbox = new QMessageBox(QMessageBox::Icon::Question,
-                obs_module_text("Question.Title"),
-                obs_module_text("Question.Delete"),
-                QMessageBox::Yes | QMessageBox::No,
-                this
-            );
-            if (msgbox->exec() == QMessageBox::Yes) {
-                GetGlobalService().RunInUIThread([this]() {
-                    auto& global = GlobalMultiOutputConfig();
-                    auto it = std::find_if(global.targets.begin(), global.targets.end(), [&](auto& x) { return x->id == targetid_; });
-                    if (it != global.targets.end()) {
-                        global.targets.erase(it);
-                    }
-                    delete this;
-                    SaveMultiOutputConfig();
-                });
-            }
-        });
+        layout->addWidget(remove_btn_ = new QPushButton(obs_module_text("Btn.Delete"), this), 1, 3);
 
-        layout->addWidget(msg_ = new QLabel(u8"", this), 2, 0, 1, 3);
+        // Keep action buttons usable in narrow docks across OBS themes.
+        for (auto button : { btn_, edit_btn_, remove_btn_ }) {
+            button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            button->setMinimumWidth(0);
+            button->setMinimumHeight(button->fontMetrics().height() + 8);
+        }
+        layout->setColumnStretch(1, 1);
+        layout->setColumnStretch(2, 1);
+        layout->setColumnStretch(3, 1);
+
+        layout->addWidget(msg_ = new QLabel(u8"", this), 2, 0, 1, 4);
         msg_->setWordWrap(true);
         layout->addItem(new QSpacerItem(0, 10), 3, 0);
         setLayout(layout);
 
         LoadConfig();
+        UpdateStatusDot();
+
+        auto startDesc = std::string(obs_module_text("Hotkey.StartTarget")) + " - " + config_->name;
+        startHotkeyId_ = obs_hotkey_register_frontend(
+            ("obs-multi-rtmp.start." + targetid_).c_str(),
+            startDesc.c_str(),
+            [](void* data, obs_hotkey_id, obs_hotkey_t*, bool pressed) {
+                if (!pressed)
+                    return;
+                static_cast<PushWidgetImpl*>(data)->StartStreaming();
+            },
+            this
+        );
+
+        auto stopDesc = std::string(obs_module_text("Hotkey.StopTarget")) + " - " + config_->name;
+        stopHotkeyId_ = obs_hotkey_register_frontend(
+            ("obs-multi-rtmp.stop." + targetid_).c_str(),
+            stopDesc.c_str(),
+            [](void* data, obs_hotkey_id, obs_hotkey_t*, bool pressed) {
+                if (!pressed)
+                    return;
+                static_cast<PushWidgetImpl*>(data)->StopStreaming();
+            },
+            this
+        );
     }
-    
+
     ~PushWidgetImpl()
     {
+        if (startHotkeyId_ != OBS_INVALID_HOTKEY_ID)
+            obs_hotkey_unregister(startHotkeyId_);
+        if (stopHotkeyId_ != OBS_INVALID_HOTKEY_ID)
+            obs_hotkey_unregister(stopHotkeyId_);
+
         ReleaseOutput();
     }
 
-    // Websocket access methods
-
-    OutputTargetConfigPtr GetConfig() const {
-        return config_;
-    }
-
-    QString GetTargetId() const override {
-        return QString::fromStdString(config_->id);
-    }
-    
-    QString GetTargetName() const override {
-        return QString::fromStdString(config_->name);
-    }
-
-    QString GetStatusText() const {
-        return msg_->text();
-    }
-    
-    bool IsRunning() const override {
-        return isRunning_;
-    }
-    
-    void UpdateUI() override {
-        LoadConfig();
-    }
 
     void StartStreaming() override {
-        if (IsRunning())
+        bool expected = false;
+        if (IsRunning() || !isStarting_.compare_exchange_strong(expected, true))
             return;
-        
+
+        auto resetStarting = finally([this] { isStarting_ = false; });
+
+        if (!config_->enabled) {
+            SetMsg(obs_module_text("Status.Disabled"));
+            return;
+        }
+
         // recreate output
         ReleaseOutput();
 
         if (output_ == nullptr)
         {
-            obs_data* output_settings = obs_data_create_from_json(config_->outputParam.dump().c_str());
-            
+            OBSDataAutoRelease output_settings = obs_data_create_from_json(config_->outputParam.dump().c_str());
+
             auto protocolInfo = GetProtocolInfos()->GetInfo(config_->protocol.c_str());
             assert(protocolInfo);
             if (!protocolInfo) {
@@ -704,8 +837,13 @@ public:
 
         if (!obs_output_start(output_))
         {
+            ReleaseOutput();
             SetMsg(obs_module_text("Error.StartOutput"));
+            return;
         }
+
+        // Start is asynchronous: keep the flag set until OnStarted()/OnStopped() clears it.
+        resetStarting.Dismiss();
     }
 
     void StopStreaming() override {
@@ -751,6 +889,8 @@ public:
     void LoadConfig()
     {
         name_->setText(QString::fromUtf8(config_->name));
+        if (enabled_cb_)
+            enabled_cb_->setChecked(config_->enabled);
     }
 
     void ResetInfo()
@@ -761,28 +901,37 @@ public:
         msg_->setText("");
     }
 
-    bool IsRunning()
+    bool IsRunning() override
     {
-        if (output_ == nullptr)
-            return false;
-        if (output_ != nullptr && obs_output_active(output_) == false)
-            return false;
-        if (output_ != nullptr && obs_output_active(output_) == true)
-            return true;
-        assert(false);
-        return false;
+        return output_ != nullptr && obs_output_active(output_);
+    }
+
+    bool GetEnabled() override { return config_->enabled; }
+
+    QString GetStatusText() const override { return msg_ ? msg_->text() : QString(); }
+    OutputTargetConfigPtr GetConfig() const override { return config_; }
+    void UpdateUI() override { if (config_) LoadConfig(); }
+
+    void SetEnabled(bool enabled) override
+    {
+        config_->enabled = enabled;
+        if (enabled_cb_ && enabled_cb_->isChecked() != enabled)
+            enabled_cb_->setChecked(enabled);
+        if (!enabled && IsRunning())
+            obs_output_force_stop(output_);
+        SaveMultiOutputConfig();
+        UpdateStatusDot();
     }
 
     void StartStop()
     {
-        if (IsRunning() == false)
-        {
-            StartStreaming();
-        }
-        else if (output_ != nullptr)
+        if (IsRunning())
         {
             StopStreaming();
+            return;
         }
+
+        StartStreaming();
     }
 
     void Stop()
@@ -816,19 +965,26 @@ public:
     // obs logical
     void OnStarting() override
     {
-        GetGlobalService().RunInUIThread([this]() {
+        RunInUIThread([this]() {
             begin_time_ = clock::now();
+            isConnecting_ = true;
+            isReconnecting_ = false;
+            lastErrorCode_ = 0;
             remove_btn_->setEnabled(false);
             btn_->setText(obs_module_text("Status.Stop"));
             btn_->setEnabled(true);
             SetMsg(obs_module_text("Status.Connecting"));
             remove_btn_->setEnabled(false);
+            UpdateStatusDot();
         });
     }
 
     void OnStarted() override
     {
-        GetGlobalService().RunInUIThread([this]() {
+        RunInUIThread([this]() {
+            isStarting_ = false;
+            isConnecting_ = false;
+            isReconnecting_ = false;
             remove_btn_->setEnabled(false);
             btn_->setText(obs_module_text("Status.Stop"));
             btn_->setEnabled(true);
@@ -836,24 +992,28 @@ public:
 
             ResetInfo();
             timer_->start();
+            UpdateStatusDot();
         });
     }
 
     void OnReconnect() override
     {
-        GetGlobalService().RunInUIThread([this]() {
+        RunInUIThread([this]() {
             timer_->stop();
+            isReconnecting_ = true;
 
             remove_btn_->setEnabled(false);
             btn_->setText(obs_module_text("Status.Stop"));
             btn_->setEnabled(true);
             SetMsg(obs_module_text("Status.Reconnecting"));
+            UpdateStatusDot();
         });
     }
 
     void OnReconnected() override
     {
-        GetGlobalService().RunInUIThread([this]() {
+        RunInUIThread([this]() {
+            isReconnecting_ = false;
             remove_btn_->setEnabled(false);
             btn_->setText(obs_module_text("Status.Stop"));
             btn_->setEnabled(true);
@@ -861,12 +1021,13 @@ public:
 
             ResetInfo();
             timer_->start();
+            UpdateStatusDot();
         });
     }
 
     void OnStopping() override
     {
-        GetGlobalService().RunInUIThread([this]() {
+        RunInUIThread([this]() {
             timer_->stop();
 
             remove_btn_->setEnabled(false);
@@ -878,7 +1039,13 @@ public:
 
     void OnStopped(int code) override
     {
-        GetGlobalService().RunInUIThread([this, code]() {
+        RunInUIThread([this, code]() {
+            ReleaseOutputSceneView();
+
+            isStarting_ = false;
+            isConnecting_ = false;
+            isReconnecting_ = false;
+            lastErrorCode_ = code;
             ResetInfo();
             timer_->stop();
 
@@ -908,10 +1075,9 @@ public:
                     SetMsg(obs_module_text("Error.Unknown"));
                     break;
             }
-        });
 
-        ReleaseOutputEncoder();
-        ReleaseOutputSceneView();
+            UpdateStatusDot(true);
+        });
     }
 };
 

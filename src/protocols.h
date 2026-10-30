@@ -3,6 +3,10 @@
 #include <string>
 #include <string_view>
 
+// Service parameter holding the stream key (bearer token for WHIP).
+inline constexpr const char* SERVICE_PARAM_STREAM_KEY = "key";
+inline constexpr const char* SERVICE_PARAM_BEARER_TOKEN = "bearer_token";
+
 struct ProtocolInfo {
     const char* protocol;
     const char* label;
