@@ -28,9 +28,9 @@ Freedesktop SDK 编译，并设置 `build-extension: true`。因此本项目打�
 而不是再复制一套 OBS 应用。
 
 本仓库的清单位于
-`flatpak/com.obsproject.Studio.Plugin.MultiRTMP.yml`，扩展 ID 是
-`com.obsproject.Studio.Plugin.MultiRTMP`，安装前缀是
-`/app/plugins/MultiRTMP`。清单显式设置 `CMAKE_INSTALL_LIBDIR=lib`，使插件最终
+`flatpak/com.obsproject.Studio.Plugin.MultiRTMPWebSocket.yml`，扩展 ID 是
+`com.obsproject.Studio.Plugin.MultiRTMPWebSocket`，安装前缀是
+`/app/plugins/MultiRTMPWebSocket`。清单显式设置 `CMAKE_INSTALL_LIBDIR=lib`，使插件最终
 位于扩展点要求的 `lib/obs-plugins`，而不是 Ubuntu DEB 使用的 multiarch 目录。
 
 ## 准备 openSUSE WSL
@@ -72,10 +72,10 @@ wsl -e bash /mnt/d/dev/obs-dev/obs-multi-rtmp/flatpak/build.sh
 1. 从本地 remote 列表确认用户级 Flathub 存在，仅在缺失时联网添加。
 2. 在 Flatpak SDK 沙箱内编译本地源码。
 3. 导出临时 OSTree 仓库到 WSL 用户缓存。
-4. 生成 `release/obs-multi-rtmp.flatpak` 单文件 bundle。
+4. 生成 `release/obs-multi-rtmp-websocket.flatpak` 单文件 bundle。
 
 临时 build/state/OSTree repo 位于 WSL 的
-`~/.cache/obs-multi-rtmp-flatpak`，可整目录删除后重新构建。不要把这些目录放在
+`~/.cache/obs-multi-rtmp-websocket-flatpak`，可整目录删除后重新构建。不要把这些目录放在
 `/mnt/c` 或 `/mnt/d`：Flatpak-builder 的 `rofiles-fuse` 不能挂载到 WSL DrvFS。
 最终 bundle 位于已被现有 `.gitignore` 排除的 `release` 目录。
 
@@ -88,7 +88,7 @@ Ubuntu 24.04/26.04 的原生包矩阵。它运行在 Flathub 的
 
 该 action 会识别清单中的 `build-extension: true`，用 `--runtime` 生成插件扩展
 bundle，并上传名为
-`obs-multi-rtmp-<版本>-flatpak-x86_64-<commit>` 的 workflow artifact。
+`obs-multi-rtmp-websocket-<版本>-flatpak-x86_64-<commit>` 的 workflow artifact。
 
 在 tag 构建中，`.github/workflows/push.yaml` 会下载该 artifact，把 `.flatpak`
 加入 `CHECKSUMS.txt`，并附加到草稿 GitHub Release。普通 workflow dispatch 只生成
@@ -99,20 +99,20 @@ Actions artifact，不创建 Release。
 安装首次构建的 bundle：
 
 ```powershell
-wsl -e flatpak --user install -y /mnt/d/dev/obs-dev/obs-multi-rtmp/release/obs-multi-rtmp.flatpak
+wsl -e flatpak --user install -y /mnt/d/dev/obs-dev/obs-multi-rtmp/release/obs-multi-rtmp-websocket.flatpak
 ```
 
 重新构建后覆盖安装：
 
 ```powershell
-wsl -e flatpak --user install --reinstall -y /mnt/d/dev/obs-dev/obs-multi-rtmp/release/obs-multi-rtmp.flatpak
+wsl -e flatpak --user install --reinstall -y /mnt/d/dev/obs-dev/obs-multi-rtmp/release/obs-multi-rtmp-websocket.flatpak
 ```
 
 检查 OBS 和插件扩展：
 
 ```powershell
 wsl -e flatpak --user info com.obsproject.Studio
-wsl -e flatpak --user info com.obsproject.Studio.Plugin.MultiRTMP
+wsl -e flatpak --user info com.obsproject.Studio.Plugin.MultiRTMPWebSocket
 wsl -e flatpak --user list --runtime
 ```
 
@@ -128,23 +128,23 @@ wsl -e flatpak run com.obsproject.Studio
 ## 本次验证结果
 
 - 官方 `com.obsproject.Studio` 版本：`32.2.1`。
-- 插件 ref：`runtime/com.obsproject.Studio.Plugin.MultiRTMP/x86_64/stable`。
+- 插件 ref：`runtime/com.obsproject.Studio.Plugin.MultiRTMPWebSocket/x86_64/stable`。
 - 插件扩展 commit：
   `bae08da49d950dcb900ae5d0d353e558531bbb80c1078eb9994d5c0b4a970bba`。
-- bundle：`release/obs-multi-rtmp.flatpak`，约 3.1 MB；安装后约 13.6 MB。
+- bundle：`release/obs-multi-rtmp-websocket.flatpak`，约 3.1 MB；安装后约 13.6 MB。
 - bundle SHA-256：
   `ACFEA2C23D1392E99D8C723D9F254246104FBBCD3CAA4EC7289C728F32DB908C`。
 - `appstreamcli validate --no-net` 通过。
 - 沙箱内 `ldd` 检查无缺失依赖，libobs、obs-frontend-api 和 Qt6 均从官方 OBS
   runtime 的 `/app/lib` 解析。
-- 限时启动 OBS 后，日志列出 `com.obsproject.Studio.Plugin.MultiRTMP`，加载
-  `obs-multi-rtmp.so`，报告插件版本 `0.7.4.0`，并正常到达
+- 限时启动 OBS 后，日志列出 `com.obsproject.Studio.Plugin.MultiRTMPWebSocket`，加载
+  `obs-multi-rtmp-websocket.so`，报告插件版本 `0.7.4.0`，并正常到达
   `Startup complete`。
 
 ## 发布时需要调整的内容
 
 当前清单使用 `type: dir` 读取工作区，适合本地开发和生成 bundle。提交 Flathub
 时应把 source 改为固定 `tag` 与 `commit` 的 Git source，并把
-`flatpak/com.obsproject.Studio.Plugin.MultiRTMP.metainfo.xml` 的 release 版本和日期
+`flatpak/com.obsproject.Studio.Plugin.MultiRTMPWebSocket.metainfo.xml` 的 release 版本和日期
 同步到正式发布版本。Flathub 通常还需要一个独立打包仓库及 `flathub.json`；其中
 `only-arches` 应与实际测试过的架构一致。

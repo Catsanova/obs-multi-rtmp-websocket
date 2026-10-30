@@ -210,7 +210,7 @@ jobs:
       - name: Build Flatpak Bundle 🧱
         uses: flatpak/flatpak-github-actions/flatpak-builder@401fe28a8384095fc1531b9d320b292f0ee45adb # v6.7
         with:
-          manifest-path: flatpak/com.obsproject.Studio.Plugin.MultiRTMP.yml
+          manifest-path: flatpak/com.obsproject.Studio.Plugin.MultiRTMPWebSocket.yml
           bundle: ${{ steps.setup.outputs.pluginName }}-${{ steps.setup.outputs.pluginVersion }}-flatpak-x86_64.flatpak
           branch: stable
           build-bundle: true

@@ -1,6 +1,6 @@
 # obs-multi-rtmp-websocket
 
-This is Catsanova/obs-multi-rtmp-websocket, a fork of
+This is a fork of
 [romestylez/obs-multi-rtmp-websocket](https://github.com/romestylez/obs-multi-rtmp-websocket),
 which is itself a fork of [sorayuki/obs-multi-rtmp](https://github.com/sorayuki/obs-multi-rtmp).
 
@@ -25,15 +25,24 @@ upstream README follows below.
 
 ## Windows
 
-- Run `obs-multi-rtmp-setup.exe`, or
+- Run `obs-multi-rtmp-websocket-<version>-windows-x64-Installer.exe`, or
 - Extract the zip into the OBS folder (for example `C:\Program Files\obs-studio`).
 
 Restart OBS after installing.
 
+This plugin replaces the original obs-multi-rtmp and reads the same
+`obs-multi-rtmp.json` settings, so existing targets carry over. Only one of the
+two may be installed. The installer removes the original from
+`%ProgramData%\obs-studio\plugins`. If you installed the original from a zip,
+delete `obs-multi-rtmp.dll` from `obs-plugins\64bit` and the
+`data\obs-plugins\obs-multi-rtmp` folder in the OBS folder yourself.
+
+Version numbers follow the upstream release the fork is based on.
+
 ## Uninstall
 
-Run the installer again and choose remove, or delete the `obs-multi-rtmp`
-folder from the plugins directory.
+Run the installer again and choose remove, or delete the
+`obs-multi-rtmp-websocket` folder from the plugins directory.
 
 ------------------------------------------------------------------------
 
@@ -71,13 +80,13 @@ cmake --build --preset ubuntu-x86_64 -j2
 Expected output:
 
 ```text
-build_x86_64/obs-multi-rtmp.so
+build_x86_64/obs-multi-rtmp-websocket.so
 ```
 
 You can also run the package-based build in Docker:
 
 ```bash
-docker build -f Dockerfile.linux-build -t obs-multi-rtmp-linux-build .
+docker build -f Dockerfile.linux-build -t obs-multi-rtmp-websocket-linux-build .
 ```
 
 Runtime loading was last smoke-tested on OBS 32.1.2 from the official OBS
@@ -183,57 +192,3 @@ from a browser.
 
 The raw sent and received JSON are shown side by side, with copy buttons.
 The request dropdown lists a subset of the requests above.
-
-------------------------------------------------------------------------
-
-# Upstream README
-
-# [Homepage / 主页](https://sorayuki.github.io/obs-multi-rtmp)
-
-## 为什么首页是日语？ / Why is the homepage in Japanese?
-
-因为最初是做给管人用的。
-
-Because it's originally made for virtual Youtubers (VTubers).
-
-# 声明 
-
-近日发现百度贴吧有个叫 maggot 的用户在售卖此插件。咸鱼上也有，没得救了。 
-
-本插件免费使用，作者不收取费用。 
-
-举报之后百度贴吧找我要软件著作权证明，累不爱。 
-
-
-# Announcement
-
-This plugin is provided for free, without a fee. 
-
-Recently a Baidu Tieba account 'maggot' is selling this plugin. Please, don't buy it.
-
-
-# お知らせ
-
-本プラグインは無償で提供されるものです。
-
-最近、Baidu Tiebaに「maggot」というアカウント名のユーザーがこのプラグインを販売する行為をしています。
-
-決して購入はしないでください。
-
-
-# Donate
-
-如果你觉得这个工具很有用想要捐赠，这里是链接。注意：这不是提需求的渠道。
-
-このツールの開発に支援もとい投げ銭をしたいと思った方は以下のリンクからお願いします。(機能のリクエストは受け付けていません)
-
-If you find this tool useful and want to doante, here is the link. (Please do not donate for feature requests.)
-
-## [paypal / 贝宝](https://paypal.me/sorayuki0)
-
-## alipay / 支付宝
-
-![alipay](./docs/zhi.png) 
-
-## wechat / 微信
-![wechat](./docs/wechat.jpg)

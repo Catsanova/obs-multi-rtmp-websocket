@@ -33,12 +33,12 @@
     },
     "platformConfig": {
         "macos": {
-            "bundleId": "net.sorayuki.obs-multi-rtmp"
+            "bundleId": "io.github.catsanova.obs-multi-rtmp-websocket"
         }
     },
-    "name": "obs-multi-rtmp",
+    "name": "obs-multi-rtmp-websocket",
     "version": "0.7.4.5",
-    "author": "SoraYuki",
-    "website": "https://github.com/sorayuki",
+    "author": "SoraYuki, romestylez, Catsanova",
+    "website": "https://github.com/Catsanova/obs-multi-rtmp-websocket",
     "email": "me@example.com"
 }
